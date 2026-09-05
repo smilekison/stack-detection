@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse,StreamingResponse
 from pydantic import BaseModel,HttpUrl,Field
 from pathlib import Path
-import tempfile,subprocess,shutil,zipfile,os,uuid,json,time
+import tempfile,subprocess,shutil,zipfile,os,uuid,json,time,queue,threading
 from core.scanner import Repository
 from core.engine import Analyzer
 from core.ast import ASTAnalyzer
@@ -19,7 +19,6 @@ from sandbox.runner import Sandbox
 from sandbox.repair import candidates as repair_candidates,apply as repair_apply
 from sandbox.policy import DEFAULT_POLICY,validate_policy
 from core.policy import deployment_gate
-
 APP_ROOT=Path(__file__).resolve().parents[1];FRONTEND=APP_ROOT/'frontend'
 app=FastAPI(title='AutoDeploy Stack Intelligence',version='1.0.0',description='Deterministic repository-to-deployment analysis and bounded validation/repair engine.')
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_methods=['*'],allow_headers=['*'])
@@ -30,15 +29,12 @@ class AnalyzeRequest(BaseModel):
  providers:list[str]=Field(default_factory=lambda:['aws','gcp','azure'])
  run_security_tools:bool=False
 class ValidateRequest(AnalyzeRequest): run_validation:bool=True
-
 def emit(events,phase,message,status='running',**extra):
  e={'id':str(uuid.uuid4()),'time':time.time(),'phase':phase,'message':message,'status':status};e.update(extra);events.append(e);return e
-
 def clone(url):
  tmp=tempfile.mkdtemp(prefix='autodeploy-repo-');target=Path(tmp)/'repo';p=subprocess.run(['git','clone','--depth','1','--no-tags','--filter=blob:none',str(url),str(target)],capture_output=True,text=True,timeout=180)
  if p.returncode:shutil.rmtree(tmp,ignore_errors=True);raise HTTPException(400,'Git clone failed: '+p.stderr[-3000:])
  return tmp,target
-
 def extract_zip(data):
  tmp=tempfile.mkdtemp(prefix='autodeploy-zip-');z=Path(tmp)/'upload.zip';z.write_bytes(data);root=Path(tmp)/'repo';root.mkdir()
  try:
@@ -51,7 +47,6 @@ def extract_zip(data):
  children=[p for p in root.iterdir() if p.is_dir()]
  if len(children)==1 and not (root/'package.json').exists() and not (root/'pyproject.toml').exists():root=children[0]
  return tmp,root
-
 def analyze_root(root,providers,events=None):
  events=events if events is not None else [];emit(events,'acquisition','Repository acquired and workspace created.','done')
  repo=Repository(root);emit(events,'inventory',f'Indexed {len(repo.files):,} files ({repo.size_bytes():,} bytes of source/config data).','done',file_count=len(repo.files))
@@ -77,7 +72,6 @@ def analyze_root(root,providers,events=None):
  emit(events,'pricing','Calculating deterministic cloud planning estimates…');pricing={p:PricingEngine().estimate(spec,p) for p in providers if p in {'aws','gcp','azure'}};emit(events,'pricing','Cloud planning estimates calculated.','done',data=pricing)
  spec.cloud={'providers':providers,'artifacts':list(files.keys())};spec.policy={'confidence':result['summary']['confidence'],'requires_manual_approval':spec.migrations.get('requires_manual_approval',False),'auto_deploy_eligible':result['summary']['confidence']>=80 and not spec.migrations.get('requires_manual_approval',False) and validation['valid'] and not any(x['severity'] in {'critical','high'} for x in spec.security['findings'])}
  result.update({'sandbox_policy':validate_policy(DEFAULT_POLICY),'deployment_ir':spec.to_dict(),'generated_files':files,'ast':ast,'dependency_graph':spec.dependencies,'migrations':spec.migrations,'security':{'findings':[x.__dict__ for x in findings],'sbom':sbom_plan(repo,result['summary']['package_manager']),'vulnerability_scan':vulnerability_plan(),'policy':security_policy(findings)},'static_validation':validation,'cloud_cost_estimates':pricing,'analysis_id':str(uuid.uuid4()),'repository':{'path_count':len(repo.files),'size_bytes':repo.size_bytes(),'hash':repo.hash()}});emit(events,'complete','Repository analysis complete.','done',data={'analysis_id':result['analysis_id'],'confidence':result['summary']['confidence']});return result,repo,spec
-
 def autonomous_validate(root,result,spec,max_attempts,run_security_tools=False,events=None):
  events=events if events is not None else [];sb=Sandbox(root);attempts=[];ledger=[];current=dockerfile(spec)
  try:
@@ -92,11 +86,9 @@ def autonomous_validate(root,result,spec,max_attempts,run_security_tools=False,e
   result['validation']={'status':'passed' if attempts and attempts[-1].get('status')=='runtime_healthy' else 'not_passed','attempts':attempts,'repair_ledger':ledger,'max_attempts':max_attempts,'autonomous_repair':bool(any(x.get('repair',{}).get('changed') for x in ledger))};result['deployment_gate']=deployment_gate(spec,result.get('static_validation',{}),result.get('security',{}).get('findings',[]),result['validation'])
  finally:sb.cleanup()
  return result
-
 @app.get('/')
 def root():
- index=FRONTEND/'index.html'
- return FileResponse(index) if index.exists() else {'service':'AutoDeploy Stack Intelligence','version':app.version,'docs':'/docs'}
+ index=FRONTEND/'index.html';return FileResponse(index) if index.exists() else {'service':'AutoDeploy Stack Intelligence','version':app.version,'docs':'/docs'}
 @app.get('/frontend/{asset_path:path}')
 def frontend_asset(asset_path:str):
  target=(FRONTEND/asset_path).resolve()
@@ -112,15 +104,25 @@ def analyze(req:AnalyzeRequest):
 @app.post('/analyze-stream')
 def analyze_stream(req:AnalyzeRequest):
  def stream():
-  try:
-   yield json.dumps({'type':'meta','analysis_id':str(uuid.uuid4()),'phase':'start','message':'Starting repository intelligence pipeline.'})+'\n';tmp,root=clone(req.repo_url)
+  q=queue.Queue();done=object()
+  class LiveEvents(list):
+   def append(self,item):super().append(item);q.put(item)
+  def worker():
    try:
-    events=[];result,_,_=analyze_root(root,req.providers,events)
-    for e in events:yield json.dumps({'type':'event',**e},default=str)+'\n'
-    yield json.dumps({'type':'result','data':result},default=str)+'\n'
-   finally:shutil.rmtree(tmp,ignore_errors=True)
-  except Exception as exc:yield json.dumps({'type':'error','message':str(exc)})+'\n'
- return StreamingResponse(stream(),media_type='application/x-ndjson',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+    q.put({'phase':'acquisition','message':'Cloning public GitHub repository…','status':'running','id':str(uuid.uuid4()),'time':time.time()});tmp,root=clone(req.repo_url)
+    try:result,_,_=analyze_root(root,req.providers,LiveEvents());q.put({'__result__':result})
+    finally:shutil.rmtree(tmp,ignore_errors=True)
+   except Exception as exc:q.put({'__error__':str(exc)})
+   finally:q.put(done)
+  yield json.dumps({'type':'meta','analysis_id':str(uuid.uuid4()),'phase':'start','message':'Starting repository intelligence pipeline.'})+'\n';t=threading.Thread(target=worker,daemon=True);t.start()
+  while True:
+   item=q.get()
+   if item is done:break
+   if '__result__' in item:yield json.dumps({'type':'result','data':item['__result__']},default=str)+'\n'
+   elif '__error__' in item:yield json.dumps({'type':'error','message':item['__error__']})+'\n'
+   else:yield json.dumps({'type':'event',**item},default=str)+'\n'
+  t.join(timeout=1)
+ return StreamingResponse(stream(),media_type='application/x-ndjson',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no','Connection':'keep-alive'})
 @app.post('/generate/dockerfile')
 def generate_dockerfile(req:AnalyzeRequest):
  tmp,root=clone(req.repo_url)
