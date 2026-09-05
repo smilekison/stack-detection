@@ -30,7 +30,13 @@ def _read(repo, path): return repo.read(path) if path else ""
 
 def _files(repo, unit): return files_for_unit(repo, unit)
 
-def _port(content, default):
+def _port(content, default, readme_port=None):
+    # README (Tier 2) outranks a generic source-code port scan (Tier 3, PROGRAM.md's own
+    # "port binding" example under source evidence) - checked first, not just as a fallback
+    # alongside the hardcoded default. Callers scanning genuine Tier 1 framework config
+    # (e.g. astro.config's explicit server.port) do not pass readme_port - that config stays
+    # authoritative over README, same as it would over a generic source scan.
+    if readme_port and 1 <= readme_port <= 65535: return readme_port
     for pat in (r"(?i)--port(?:=|\s+)[\"']?(\d{2,5})", r"(?i)\bPORT\s*[:=]\s*[\"']?(\d{2,5})", r"(?i)localhost:(\d{2,5})", r"(?i)127\.0\.0\.1:(\d{2,5})"):
         m = re.search(pat, content or "")
         if m and 1 <= int(m.group(1)) <= 65535: return int(m.group(1))
@@ -207,17 +213,17 @@ def analyze(repo,spec,result,target=None):
                 strategy="static-preview"; start=f"{pm} run preview -- --host 0.0.0.0 --port {port}"; spec.build.update({"runtime_strategy":strategy,"adapter":adapter})
             else: check("RUNTIME","Production runtime","blocker",[cfgf] if cfgf else [],"No deterministic Astro runtime for the selected adapter/output.")
         elif framework in {"Next.js","Nuxt","NestJS","SvelteKit","Remix"} and scripts.get("start"):
-            port=_port(_unit_text(repo,selected),3000); strategy="node-framework"; start=f"{pm} run start -- --hostname 0.0.0.0 --port {port}" if framework in {"Next.js","Nuxt"} else scripts["start"]; spec.build["runtime_strategy"]=strategy
+            port=_port(_unit_text(repo,selected),3000,readme["port"]); strategy="node-framework"; start=f"{pm} run start -- --hostname 0.0.0.0 --port {port}" if framework in {"Next.js","Nuxt"} else scripts["start"]; spec.build["runtime_strategy"]=strategy
         elif framework in {"Vite","React","Vue","Svelte","Angular","Gatsby","Docusaurus","Eleventy","SolidJS","Preact"} and scripts.get("build") and not scripts.get("start"):
             port=8080; output="build" if framework=="React" and "react-scripts" in deps else "dist"; strategy="static-node"; start='nginx -g "daemon off;"'; spec.build.update({"runtime_strategy":strategy,"output":output})
         elif scripts.get("start"):
-            port=_port(_unit_text(repo,selected),readme["port"] or 3000); strategy="node-script"; start=scripts["start"]; spec.build["runtime_strategy"]=strategy
+            port=_port(_unit_text(repo,selected),3000,readme["port"]); strategy="node-script"; start=scripts["start"]; spec.build["runtime_strategy"]=strategy
             readme_start=next((c["command"] for c in readme["commands"]["start"]["production"]),None)
             if readme_start:
                 start,contradiction=_reconcile_command(start,readme_start)
                 if contradiction: check("EVIDENCE_RECONCILIATION","Production command reconciliation","blocker",[manifest],f"README documents a different production command ('{readme_start}') than package.json's start script ('{scripts['start']}'); refusing to guess.")
         elif readme["commands"]["start"]["production"]:
-            readme_cmd=readme["commands"]["start"]["production"][0]; start=readme_cmd["command"]; port=_port(_unit_text(repo,selected),readme["port"] or 3000); strategy="readme-documented"; spec.build["runtime_strategy"]=strategy
+            readme_cmd=readme["commands"]["start"]["production"][0]; start=readme_cmd["command"]; port=_port(_unit_text(repo,selected),3000,readme["port"]); strategy="readme-documented"; spec.build["runtime_strategy"]=strategy
             check("RUNTIME","Production runtime (README)","pass",[readme_cmd["source"]],f"No package.json start script was provable; using README-documented production command: {start}")
         elif scripts.get("dev"):
             check("RUNTIME","Production runtime","blocker",[manifest],"Only a development script exists; refusing to turn it into a production runtime except for a verified framework fallback.")
@@ -226,7 +232,7 @@ def analyze(repo,spec,result,target=None):
     elif not blockers and eco=="python":
         manifests,framework=_python(repo,selected); manifest=manifests[0] if manifests else None; language="Python"; spec.runtime={"name":"Python","version":"3.12"}; spec.build.update({"dependency_manifest":manifest,"project_dir":root})
         check("MANIFEST","Python dependency manifest","pass" if manifest else "blocker",manifests[:10])
-        port=_port(_unit_text(repo,selected),readme["port"] or 8000); py=[f for f in files if f.endswith(".py")]; entry=None
+        port=_port(_unit_text(repo,selected),8000,readme["port"]); py=[f for f in files if f.endswith(".py")]; entry=None
         if framework=="Django":
             entry=next((f for f in py if Path(f).name=="wsgi.py"),None); start=f"gunicorn {_module(entry)}:application --bind 0.0.0.0:{port}" if entry else ""
             strategy="python-gunicorn"
@@ -248,20 +254,20 @@ def analyze(repo,spec,result,target=None):
         else: check("ENTRYPOINT","Python web entrypoint","blocker",py[:10],f"No deterministic web entrypoint for framework={framework or 'Unknown'}.")
 
     elif not blockers and eco=="go":
-        target,framework=_go(repo,selected); language="Go"; gm=_read(repo,selected.get("manifest")); m=re.search(r"(?m)^go\s+([0-9.]+)",gm); spec.runtime={"name":"Go","version":m.group(1) if m else "1.24"}; port=_port(_unit_text(repo,selected),readme["port"] or 8080)
+        target,framework=_go(repo,selected); language="Go"; gm=_read(repo,selected.get("manifest")); m=re.search(r"(?m)^go\s+([0-9.]+)",gm); spec.runtime={"name":"Go","version":m.group(1) if m else "1.24"}; port=_port(_unit_text(repo,selected),8080,readme["port"])
         if target: strategy="go-binary"; start="/app"; spec.build.update({"runtime_strategy":strategy,"source_package":target,"container_command":f'CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app {target}'})
         else: check("ENTRYPOINT","Go main package","blocker",[],"No package main + func main entrypoint.")
 
     elif not blockers and eco=="rust":
-        binary,framework=_rust(repo,selected); language="Rust"; spec.runtime={"name":"Rust","version":"1.88"}; port=_port(_unit_text(repo,selected),readme["port"] or 8080); strategy="rust-binary"; start=f"/app/{binary}"; spec.build.update({"runtime_strategy":strategy,"binary":binary,"container_command":"cargo build --release"})
+        binary,framework=_rust(repo,selected); language="Rust"; spec.runtime={"name":"Rust","version":"1.88"}; port=_port(_unit_text(repo,selected),8080,readme["port"]); strategy="rust-binary"; start=f"/app/{binary}"; spec.build.update({"runtime_strategy":strategy,"binary":binary,"container_command":"cargo build --release"})
 
     elif not blockers and eco in {"jvm","scala"}:
-        manager,framework=_jvm(repo,selected); language="JVM"; spec.runtime={"name":"JDK","version":"21"}; port=_port(_unit_text(repo,selected),readme["port"] or 8080)
+        manager,framework=_jvm(repo,selected); language="JVM"; spec.runtime={"name":"JDK","version":"21"}; port=_port(_unit_text(repo,selected),8080,readme["port"])
         if framework in {"Spring Boot","Quarkus","Micronaut","Ktor","Play Framework"}: strategy="jvm-jar"; start="java -jar /app/app.jar"; spec.build.update({"runtime_strategy":strategy,"jvm_manager":manager})
         else: check("ENTRYPOINT","JVM web runtime","blocker",selected.get("manifests",[]),"No deterministic supported JVM web framework/runtime identified.")
 
     elif not blockers and eco in {"dotnet","fsharp","vbnet"}:
-        project,tfm,assembly,framework=_dotnet(repo,selected); language=LANGUAGE_NAMES.get(eco,eco); spec.runtime={"name":".NET","version":tfm}; port=_port(_unit_text(repo,selected),readme["port"] or 8080)
+        project,tfm,assembly,framework=_dotnet(repo,selected); language=LANGUAGE_NAMES.get(eco,eco); spec.runtime={"name":".NET","version":tfm}; port=_port(_unit_text(repo,selected),8080,readme["port"])
         if project and (framework or eco=="dotnet"): strategy="dotnet-aspnet"; start=f"dotnet /app/{assembly}.dll"; spec.build.update({"runtime_strategy":strategy,"project_file":project,"assembly":assembly})
         else: check("ENTRYPOINT",".NET web runtime","blocker",[project] if project else [],"No deterministic ASP.NET web project identified.")
 
@@ -273,7 +279,7 @@ def analyze(repo,spec,result,target=None):
         else: check("ENTRYPOINT","PHP web entrypoint","blocker",[composer] if composer else [],"No deterministic PHP web entrypoint.")
 
     elif not blockers and eco=="ruby":
-        framework,rails,rack=_ruby(repo,selected); language="Ruby"; port=_port(_unit_text(repo,selected),readme["port"] or 3000)
+        framework,rails,rack=_ruby(repo,selected); language="Ruby"; port=_port(_unit_text(repo,selected),3000,readme["port"])
         readme_start=next((c["command"] for c in readme["commands"]["start"]["production"]),None)
         if rails: strategy="ruby-rails"; start=f"bundle exec rails server -b 0.0.0.0 -p {port}"
         elif rack: strategy="ruby-rack"; start=f"bundle exec rackup -o 0.0.0.0 -p {port}"
