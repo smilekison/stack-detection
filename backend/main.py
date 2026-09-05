@@ -36,6 +36,7 @@ class AnalyzeRequest(BaseModel):
     run_security_tools: bool = False
     analysis_id: str | None = None
     target: str | None = None
+    mode: str | None = None  # 'generate' | 'existing' - required when a Dockerfile already exists
 
 class ValidateRequest(AnalyzeRequest):
     run_validation: bool = True
@@ -156,8 +157,29 @@ def _generation_gate(result, spec, artifact):
     if spec.migrations.get('requires_manual_approval'):
         raise HTTPException(status_code=409, detail={'message': 'Generation blocked by the repository migration approval gate.', 'phase': 'analysis_gate', 'requested_artifact': artifact, 'migrations': spec.migrations})
 
+def _existing_dockerfile(root, spec):
+    """The repo's own Dockerfile, if any - PROGRAM.md S24: existing infrastructure must be
+    discovered before generating replacement infrastructure, not silently overwritten.
+    Prefers the shallowest match (closest to repo root, the conventional location)."""
+    candidates = sorted((f for f in spec.infrastructure.get('files', []) if Path(f).name.lower() == 'dockerfile'), key=lambda f: len(Path(f).parts))
+    if not candidates: return None
+    path = candidates[0]; full = Path(root, path)
+    if not full.exists(): return None
+    return path, full.read_text(errors='ignore')
+
 def _generate_from_analysis(root, result, spec, artifact, req):
     _generation_gate(result, spec, artifact)
+    if artifact.lower().strip() in {'dockerfile', 'docker'}:
+        existing = _existing_dockerfile(root, spec)
+        mode = (req.mode or '').lower().strip()
+        if existing and mode not in {'generate', 'existing'}:
+            path, content = existing
+            raise HTTPException(status_code=409, detail={'message': f'A Dockerfile already exists at {path}. Choose how to proceed: mode="existing" to use it as-is, or mode="generate" to generate a new one from the analyzed evidence.', 'phase': 'existing_artifact_choice', 'requested_artifact': 'dockerfile', 'existing_dockerfile': {'path': path, 'content': content}})
+        if existing and mode == 'existing':
+            path, content = existing
+            generation = {'status': 'existing', 'requested_artifact': 'dockerfile', 'files': [path], 'source': 'repository'}
+            result['generation'] = generation; result['generated_files'] = {path: content}
+            return path, content, result, generation
     filename, content, kind = _requested_artifact(spec, artifact)
     generation = {'status': 'generated', 'requested_artifact': kind, 'files': [filename]}
     if kind == 'dockerfile':
