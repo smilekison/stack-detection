@@ -14,6 +14,8 @@ MANIFESTS = {
 }
 CONTROL_DIRS = {"backend", "frontend", "server", "client", "api", "app", "web", "worker", "workers", "services", "apps", "packages", "src"}
 ENTRYPOINT_NAMES = {"main.py", "app.py", "server.py", "wsgi.py", "asgi.py", "main.go", "main.rs", "Program.cs", "index.php", "config.ru", "index.html"}
+NON_RUNTIME_DIRS = {"tests", "test", "__tests__", "docs", "doc", "examples", "example", "fixtures", "mocks", "mock", "benchmarks", "benchmark"}
+NON_RUNTIME_NAMES = {"readme.md", "readme.rst", "changelog.md", "license", "license.md"}
 
 
 def _depth(path):
@@ -30,7 +32,7 @@ def _under(path, root):
 
 
 def discover_units(repo):
-    """Discover real application units from manifests, never from repository-wide words."""
+    """Discover real application units from manifests, never from arbitrary repository words."""
     units = []
     seen = set()
     for path in repo.files:
@@ -46,18 +48,32 @@ def discover_units(repo):
         units.append({"id": root or ".", "root": root, "manifest": path, "manifest_name": name, "ecosystem": ecosystem})
 
     if not units:
-        html = [f for f in repo.files if Path(f).name == "index.html"]
+        html = [f for f in repo.files if Path(f).name == "index.html" and not any(p in NON_RUNTIME_DIRS for p in Path(f).parts[:-1])]
         if html:
             for root in sorted({_root_for(f) for f in html}, key=lambda x: (_depth(x), x)):
                 units.append({"id": root or ".", "root": root, "manifest": None, "manifest_name": None, "ecosystem": "static"})
     return sorted(units, key=lambda u: (_depth(u["root"]), u["root"], u["manifest"] or ""))
 
 
-def files_for_unit(repo, unit, include_nested_units=False):
+def files_for_unit(repo, unit, include_nested_units=False, include_non_runtime=False):
     root = unit.get("root", "")
     all_units = discover_units(repo)
     nested_roots = {u["root"] for u in all_units if u["root"] and u["root"] != root and _under(u["root"], root)}
-    return [f for f in repo.files if _under(f, root) and (include_nested_units or not any(_under(f, n) for n in nested_roots))]
+    out = []
+    for f in repo.files:
+        if not _under(f, root):
+            continue
+        if not include_nested_units and any(_under(f, n) for n in nested_roots):
+            continue
+        if not include_non_runtime:
+            parts = Path(f).parts
+            if any(p.lower() in NON_RUNTIME_DIRS for p in parts[:-1]) or Path(f).name.lower() in NON_RUNTIME_NAMES:
+                continue
+        out.append(f)
+    # Always retain the unit manifest even if a project names a directory "docs" or "test".
+    if unit.get("manifest") and unit["manifest"] not in out:
+        out.append(unit["manifest"])
+    return sorted(set(out))
 
 
 def read_unit_json(repo, unit):
@@ -67,9 +83,9 @@ def read_unit_json(repo, unit):
     return repo.json(manifest)
 
 
-def text(repo, unit, suffixes=None, names=None, include_nested_units=False):
+def text(repo, unit, suffixes=None, names=None, include_nested_units=False, include_non_runtime=False):
     suffixes, names = set(suffixes or ()), set(names or ())
-    selected = [f for f in files_for_unit(repo, unit, include_nested_units) if Path(f).suffix.lower() in suffixes or Path(f).name in names]
+    selected = [f for f in files_for_unit(repo, unit, include_nested_units, include_non_runtime) if Path(f).suffix.lower() in suffixes or Path(f).name in names]
     return "\n".join(f"--- {f} ---\n{repo.read(f)}" for f in selected)
 
 
@@ -107,7 +123,6 @@ def select_unit(repo, preferred_root=None):
     if len(ranked) > 1:
         top_score, top = ranked[0]
         second_score, second = ranked[1]
-        # A close contest between real application units is an ambiguity, not a reason to guess.
         if top["root"] != second["root"] and second_score >= max(50, top_score - 8):
             return None, units, "ambiguous_application_units"
     return ranked[0][1], units, None
