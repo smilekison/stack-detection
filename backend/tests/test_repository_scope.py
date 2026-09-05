@@ -50,3 +50,26 @@ def test_application_units_are_manifest_based(tmp_path):
     assert units[0]["manifest"] == "backend/requirements.txt"
     assert units[0]["manifests"] == ["backend/requirements.txt"]
     assert units[0]["ecosystem"] == "python"
+    assert units[0]["ecosystems"] == ["python"]
+
+
+def test_polyglot_manifests_in_one_root_are_one_unit(tmp_path):
+    write(tmp_path, "package.json", '{"scripts":{"build":"vite build"}}')
+    write(tmp_path, "pyproject.toml", '[project]\nname="tooling"\n')
+    units = discover_units(Repository(tmp_path))
+    assert len(units) == 1
+    assert units[0]["ecosystem"] == "polyglot"
+    assert set(units[0]["ecosystems"]) == {"node", "python"}
+
+
+def test_technology_mentions_in_docs_and_tests_do_not_define_project_stack(tmp_path):
+    write(tmp_path, "package.json", '{"dependencies":{"express":"5.0.0"},"scripts":{"start":"node server.js"}}')
+    write(tmp_path, "server.js", "const express = require('express');\nconst app = express();\napp.listen(process.env.PORT || 3000);\n")
+    write(tmp_path, "docs/architecture.md", "This example compares Django, Rails, Laravel, Spring Boot and FastAPI.")
+    write(tmp_path, "tests/framework-fixture.js", "const fake = 'django flask rails laravel spring';\n")
+    write(tmp_path, "src/notes.txt", "Next.js and Astro are alternatives.")
+
+    _, _, result = Analyzer(Repository(tmp_path)).analyze()
+    assert result["summary"]["framework"] == "Express"
+    assert result["frameworks"][0]["name"] == "Express"
+    assert result["deep_analysis"]["technology_profile"][0][0] == "JavaScript"
