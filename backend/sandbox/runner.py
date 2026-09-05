@@ -8,12 +8,16 @@ class Sandbox:
   try:
    p=subprocess.run(cmd,cwd=cwd or self.repo,capture_output=True,text=True,timeout=timeout,env={**os.environ,'DOCKER_CONFIG':str(self.work/'docker-config')});return {'command':cmd,'returncode':p.returncode,'stdout':(p.stdout or '')[-20000:],'stderr':(p.stderr or '')[-20000:],'duration_seconds':round(time.time()-t,2)}
   except subprocess.TimeoutExpired:return {'command':cmd,'returncode':124,'stdout':'','stderr':'TIMEOUT','duration_seconds':round(time.time()-t,2)}
- def build_and_test(self,dockerfile_path='Dockerfile',port=8000,health_path='/'):
+ def build_and_test(self,dockerfile_path='Dockerfile',port=8000,health_path='/',writable_paths=None):
   if not self.docker_available():return {'available':False,'status':'skipped','reason':'Docker worker unavailable; no untrusted code was executed.'}
   tag='autodeploy-sandbox:'+self.repo.name.lower().replace('_','-')[:30]
   build=self.run(['docker','build','--progress=plain','--network=default','--pull','--no-cache','-f',dockerfile_path,'-t',tag,'.'],900)
   if build['returncode']!=0:return {'available':True,'status':'build_failed','build':build,'diagnosis':diagnose(build['stderr'])}
-  run=self.run(['docker','run','-d','--rm','--network','none','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','1024m','--cpus','1','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=128m','-p',f'127.0.0.1::{port}',tag],60)
+  run_cmd=['docker','run','-d','--rm','--network','none','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','1024m','--cpus','1','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=128m,uid=10001,gid=10001']
+  for path in writable_paths or []:
+   if path != '/tmp':run_cmd.extend(['--tmpfs',f'{path}:rw,noexec,nosuid,size=128m,uid=10001,gid=10001'])
+  run_cmd.extend(['-p',f'127.0.0.1::{port}',tag])
+  run=self.run(run_cmd,60)
   if run['returncode']!=0:return {'available':True,'status':'run_failed','image_tag':tag,'build':build,'run':run,'diagnosis':diagnose(run['stderr'])}
   cid=run['stdout'].strip();mapped=self.run(['docker','port',cid,str(port)],10);m=re.search(r':(\d+)$',mapped.get('stdout','').strip());hp=int(m.group(1)) if m else None;smoke={'ok':False,'status':None,'url':None,'error':None}
   for path in dict.fromkeys([health_path,'/health','/healthz','/']):
