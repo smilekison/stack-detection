@@ -13,6 +13,12 @@ class Sandbox:
   tag='autodeploy-sandbox:'+self.repo.name.lower().replace('_','-')[:30]
   build=self.run(['docker','build','--progress=plain','--network=default','--pull','--no-cache','-f',dockerfile_path,'-t',tag,'.'],900)
   if build['returncode']!=0:return {'available':True,'status':'build_failed','build':build,'diagnosis':diagnose(build['stderr'])}
+  if writable_paths is None:
+   try:
+    generated=self.repo.joinpath(dockerfile_path).read_text(errors='ignore')
+    writable_paths=['/app/.astro','/app/node_modules/.vite','/app/node_modules/.astro'] if re.search(r'(?i)run\\s+dev\\b',generated) else []
+   except OSError:
+    writable_paths=[]
   run_cmd=['docker','run','-d','--rm','--network','none','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','1024m','--cpus','1','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=128m,uid=10001,gid=10001']
   for path in writable_paths or []:
    if path != '/tmp':run_cmd.extend(['--tmpfs',f'{path}:rw,noexec,nosuid,size=128m,uid=10001,gid=10001'])
@@ -36,7 +42,7 @@ class Sandbox:
   return out
  def cleanup(self):shutil.rmtree(self.work,ignore_errors=True)
 def diagnose(text):
- s=(text or '').lower();rules=[('missing_file',['no such file or directory','not found'],'Reinspect generated paths and artifact layout.'),('missing_module',['cannot find module','modulenotfounderror','no module named'],'Reconcile runtime dependency installation and lockfile.'),('exec_format',['exec format error'],'Verify architecture and executable format.'),('permission',['permission denied'],'Fix ownership/permissions while retaining non-root runtime.'),('lockfile',['lockfile','frozen-lockfile','package-lock'],'Use the repository lockfile and matching package manager.'),('memory',['out of memory','oom'],'Increase bounded worker memory or reduce build parallelism.'),('health',['connection refused','timed out'],'Re-evaluate bind address, port and health route.'),('network',['network is unreachable','could not resolve','temporary failure resolving'],'Use controlled build egress and keep runtime egress disabled.')]
+ s=(text or '').lower();rules=[('missing_file',['no such file or directory','not found'],'Reinspect generated paths and artifact layout.'),('missing_module',['cannot find module','modulenotfounderror','no module named'],'Reconcile runtime dependency installation and lockfile.'),('exec_format',['exec format error'],'Verify architecture and executable format.'),('permission',['permission denied'],'Fix ownership/permissions while retaining non-root runtime.'),('lockfile',['lockfile','frozen-lockfile','package-lock'],'Use the repository lockfile and matching package manager.'),('memory',['out of memory','oom'],'Increase bounded worker memory.'),('health',['connection refused','timed out'],'Re-evaluate bind address, port and health route.'),('network',['network is unreachable','could not resolve','temporary failure resolving'],'Use controlled build egress and keep runtime egress disabled.')]
  for code,needles,fix in rules:
   if any(n in s for n in needles):return {'code':code,'message':fix,'confidence':0.9}
  return {'code':'unknown','message':'No deterministic diagnosis matched. Stop autonomous mutation and retain evidence for review.','confidence':0.1}
