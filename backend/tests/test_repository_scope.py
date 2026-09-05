@@ -45,12 +45,14 @@ def test_application_units_are_manifest_based(tmp_path):
     write(tmp_path, "backend/requirements.txt", "fastapi\n")
     write(tmp_path, "frontend/index.html", "<html></html>")
     units = discover_units(Repository(tmp_path))
-    assert len(units) == 1
-    assert units[0]["id"] == "backend"
-    assert units[0]["manifest"] == "backend/requirements.txt"
-    assert units[0]["manifests"] == ["backend/requirements.txt"]
-    assert units[0]["ecosystem"] == "python"
-    assert units[0]["ecosystems"] == ["python"]
+    assert len(units) == 2
+    backend = next(x for x in units if x["root"] == "backend")
+    frontend = next(x for x in units if x["root"] == "frontend")
+    assert backend["manifest"] == "backend/requirements.txt"
+    assert backend["manifests"] == ["backend/requirements.txt"]
+    assert backend["ecosystem"] == "python"
+    assert backend["ecosystems"] == ["python"]
+    assert frontend["ecosystem"] == "static"
 
 
 def test_polyglot_manifests_in_one_root_are_one_unit(tmp_path):
@@ -73,3 +75,13 @@ def test_technology_mentions_in_docs_and_tests_do_not_define_project_stack(tmp_p
     assert result["summary"]["framework"] == "Express"
     assert result["frameworks"][0]["name"] == "Express"
     assert result["deep_analysis"]["technology_profile"][0][0] == "JavaScript"
+
+
+def test_backend_and_static_frontend_are_not_silently_merged(tmp_path):
+    write(tmp_path, "backend/requirements.txt", "fastapi\nuvicorn\n")
+    write(tmp_path, "backend/main.py", "from fastapi import FastAPI\napp=FastAPI()\n")
+    write(tmp_path, "frontend/index.html", "<html><body>frontend</body></html>")
+    selected, units, error = select_unit(Repository(tmp_path))
+    assert len(units) == 2
+    assert selected is None
+    assert error == "ambiguous_application_units"
