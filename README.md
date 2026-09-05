@@ -12,6 +12,7 @@ The backend serves the repository intelligence dashboard at `/`, so the normal l
 cd backend
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
+
 ```
 
 Open `http://localhost:8000`.
