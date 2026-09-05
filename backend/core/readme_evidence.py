@@ -10,9 +10,21 @@ from pathlib import Path
 
 README_NAMES = {"readme.md", "readme.rst", "readme.txt", "readme"}
 SHELL_LANGUAGES = {"bash", "sh", "shell", "zsh", "console", "cmd", "powershell", "ps1"}
-DEV_PATTERN = re.compile(r"--reload|--hot|nodemon|\bdev\b|\bwatch\b", re.I)
+# \bdev\w*\b, not just \bdev\b: frameworks name their dev-mode command "develop"/
+# "development" as often as bare "dev" (Strapi's `strapi develop` / `npm run develop` is
+# its actual auto-reload dev server, the same role `--reload` plays elsewhere) - the exact-
+# word version missed those, letting a genuine dev command read as a production one.
+DEV_PATTERN = re.compile(r"--reload|--hot|nodemon|\bdev\w*\b|\bwatch\b", re.I)
 INSTALL_MARKERS = ("pip install", "npm ci", "npm install", "yarn install", "pnpm install", "bundle install", "composer install", "go mod download", "poetry install", "pipenv install", "bun install")
 TEST_MARKERS = ("pytest", "unittest", "compileall", "mypy", "flake8", "eslint", "jest", "mocha", "go test", "cargo test", "rspec", "phpunit")
+# File/env/utility verbs that show up constantly in README setup instructions (copying an
+# example env file, making a directory, chmod'ing a script...) but never start a long-running
+# server. Without this, `_classify` had no way to say "none of the above" other than
+# defaulting to "start" - so `cp .env.example .env` was mistaken for a documented production
+# command and blocked generation against a real repo (README vs package.json contradiction
+# that was never a real contradiction). A blocklist of unambiguous non-start verbs is more
+# robust here than trying to allowlist every framework's start-command syntax.
+SETUP_VERBS = {"cp", "mv", "mkdir", "rmdir", "rm", "touch", "chmod", "chown", "export", "source", "git", "curl", "wget", "echo", "cat", "ls", "ln", "tar", "unzip", "sed", "awk", "grep", "find", "open", "code", "vim", "vi", "nano", "set", "unset", "kubectl", "helm"}
 PORT_PATTERNS = (r"--port[= ](\d{2,5})", r"\bport[= ](\d{2,5})\b", r":(\d{2,5})\b")
 
 
@@ -49,11 +61,19 @@ def _code_blocks(body):
 def _is_development(command): return bool(DEV_PATTERN.search(command))
 
 
+def _first_verb(command):
+    tokens = command.strip().split()
+    i = 0
+    while i < len(tokens) and tokens[i].lower() == "sudo": i += 1
+    return tokens[i].lower() if i < len(tokens) else ""
+
+
 def _classify(command):
     low = command.lower()
     if any(m in low for m in INSTALL_MARKERS): return "install"
     if any(m in low for m in TEST_MARKERS): return "test"
     if re.search(r"\bbuild\b", low): return "build"
+    if _first_verb(command) in SETUP_VERBS: return "setup"
     return "start"
 
 
@@ -68,7 +88,7 @@ def _port(command):
 
 def parse(repo, unit=None):
     """Extract structured operational evidence from README(s) for a unit (or the repo root)."""
-    result = {"working_directory": None, "port": None, "commands": {"install": [], "build": [], "test": [], "start": {"development": [], "production": []}}}
+    result = {"working_directory": None, "port": None, "commands": {"install": [], "build": [], "test": [], "setup": [], "start": {"development": [], "production": []}}}
     for path in _readmes(repo, unit):
         for heading, body in _sections(repo.read(path)):
             for block in _code_blocks(body):
@@ -83,6 +103,6 @@ def parse(repo, unit=None):
                     if cwd and result["working_directory"] is None: result["working_directory"] = cwd
                     entry = {"command": line, "heading": heading, "working_directory": cwd, "source": path}
                     kind = _classify(line)
-                    if kind in ("install", "build", "test"): result["commands"][kind].append(entry)
+                    if kind in ("install", "build", "test", "setup"): result["commands"][kind].append(entry)
                     else: result["commands"]["start"]["development" if _is_development(line) else "production"].append(entry)
     return result

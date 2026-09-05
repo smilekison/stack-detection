@@ -84,6 +84,14 @@ def main():
             "package.json": json.dumps({"scripts": {"build": "mkdir -p dist && printf ok > dist-marker", "start": "node server.js"}}),
             "server.js": "require('http').createServer((q,s)=>s.end('ok')).listen(process.env.PORT||3000,'0.0.0.0')\n",
         }), 3000),
+        # engines.node as a RANGE (not a single version) used to truncate into an invalid
+        # Docker tag ("18.0", never published); scripts.start invoking a locally-installed
+        # binary (real npm package, not a hand-rolled script) used to fail with "not found"
+        # when run as a literal shell command instead of through the package manager.
+        "node-binary-start": (fixture("node-binary-start", {
+            "package.json": json.dumps({"engines": {"node": ">=18.0.0 <=22.x.x"}, "scripts": {"build": "true", "start": "http-server -p 3000 ."}, "dependencies": {"http-server": "14.1.1"}}),
+            "index.html": "<h1>ok</h1>\n",
+        }), 3000),
         "python": (fixture("python", {
             "requirements.txt": "fastapi==0.116.1\nuvicorn==0.35.0\n",
             "main.py": "from fastapi import FastAPI\napp=FastAPI()\n",
