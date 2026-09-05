@@ -253,11 +253,16 @@ def analyze(repo,spec,result,target=None):
                 strategy="static-preview"; start=f"{pm} run preview -- --host 0.0.0.0 --port {port}"; spec.build.update({"runtime_strategy":strategy,"adapter":adapter})
             else: check("RUNTIME","Production runtime","blocker",[cfgf] if cfgf else [],"No deterministic Astro runtime for the selected adapter/output.")
         elif framework in {"Next.js","Nuxt","NestJS","SvelteKit","Remix"} and scripts.get("start"):
-            port=_port(_unit_text(repo,selected),3000,readme["port"]); strategy="node-framework"; start=f"{pm} run start -- --hostname 0.0.0.0 --port {port}" if framework in {"Next.js","Nuxt"} else scripts["start"]; spec.build["runtime_strategy"]=strategy
+            # `scripts["start"]`'s own value (e.g. "nest start") is meant to run through the
+            # package manager, not as a literal shell command - the binaries it invokes
+            # (nest, strapi, ...) live in node_modules/.bin, only on PATH via `npm run`.
+            port=_port(_unit_text(repo,selected),3000,readme["port"]); strategy="node-framework"; start=f"{pm} run start -- --hostname 0.0.0.0 --port {port}" if framework in {"Next.js","Nuxt"} else f"{pm} run start"; spec.build["runtime_strategy"]=strategy
         elif framework in {"Vite","React","Vue","Svelte","Angular","Gatsby","Docusaurus","Eleventy","SolidJS","Preact"} and scripts.get("build") and not scripts.get("start"):
             port=8080; output="build" if framework=="React" and "react-scripts" in deps else "dist"; strategy="static-node"; start='nginx -g "daemon off;"'; spec.build.update({"runtime_strategy":strategy,"output":output})
         elif scripts.get("start"):
-            port=_port(_unit_text(repo,selected),3000,readme["port"]); strategy="node-script"; start=scripts["start"]; spec.build["runtime_strategy"]=strategy
+            # Same reasoning as the node-framework branch above: run the script through the
+            # package manager, not scripts["start"]'s raw value as a literal shell command.
+            port=_port(_unit_text(repo,selected),3000,readme["port"]); strategy="node-script"; start=f"{pm} run start"; spec.build["runtime_strategy"]=strategy
             readme_start=next((c["command"] for c in readme["commands"]["start"]["production"]),None)
             if readme_start:
                 start,contradiction=_reconcile_command(start,readme_start)

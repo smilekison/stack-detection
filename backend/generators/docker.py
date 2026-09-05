@@ -3,9 +3,22 @@ import re
 from pathlib import Path
 
 
+_RANGE_MARKERS = re.compile(r"[<>^~]|\s")
+
+
 def _tag(value, default):
-    m = re.search(r"(?<!\d)(\d+)(?:\.(\d+))?", str(value or ""))
-    return m.group(1) + (("." + m.group(2)) if m and m.group(2) else "") if m else default
+    """Docker base-image tag from a version string - manifest fields like package.json
+    engines or a runtime spec often hold a RANGE (">=18.0.0 <=22.x.x"), not a single
+    version. The old two-part extraction truncated that into "18.0" - not a real published
+    tag (Node's official images only ever publish MAJOR alone or a full MAJOR.MINOR.PATCH
+    pin), so the build failed outright. A range only ever pins safely to its major version;
+    a single standalone version (no range operators) can use its full precision.
+    """
+    s = str(value or "").strip()
+    m = re.search(r"(?<!\d)(\d+)(?:\.(\d+)(?:\.(\d+))?)?", s)
+    if not m: return default
+    if _RANGE_MARKERS.search(s): return m.group(1)
+    return m.group(1) + (("." + m.group(2) + (("." + m.group(3)) if m.group(3) else "")) if m.group(2) else "")
 
 
 def _pm_info(spec):
