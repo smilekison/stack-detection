@@ -1,14 +1,8 @@
 from pathlib import Path
-import json
 import re
 
 
-LOCKFILES = {
-    'npm': 'package-lock.json',
-    'pnpm': 'pnpm-lock.yaml',
-    'yarn': 'yarn.lock',
-    'bun': 'bun.lock',
-}
+LOCKFILES = {'npm': 'package-lock.json', 'pnpm': 'pnpm-lock.yaml', 'yarn': 'yarn.lock', 'bun': 'bun.lock'}
 
 
 def _package(repo):
@@ -25,7 +19,8 @@ def _first_file(repo, names):
 
 def _port_from_text(text):
     patterns = [
-        r'(?i)(?:--port|port\s*[:=]|PORT\s*[:=]|listen\s*\(\s*[^,]+,?\s*)(?:parseInt\([^,]+,?\s*)?[\'\"]?(\d{2,5})',
+        r'(?i)--port\s+(?:=\s*)?[\'\"]?(\d{2,5})',
+        r'(?i)\b(?:port|PORT)\s*[:=]\s*[\'\"]?(\d{2,5})',
         r'(?i)localhost:(\d{2,5})',
         r'(?i)127\.0\.0\.1:(\d{2,5})',
     ]
@@ -53,26 +48,17 @@ def _node_version(repo, pkg):
             if value:
                 return value
     engines = pkg.get('engines') or {}
-    if engines.get('node'):
-        return str(engines['node'])
-    return '20'
+    return str(engines.get('node', '20'))
 
 
 def analyze(repo, spec, result):
-    """Perform a second, deployment-focused pass before artifact generation.
-
-    This pass intentionally does not infer a command from a framework name alone.
-    It reconciles manifests, scripts, config, adapters, output mode, ports and
-    repository layout, then records explicit generation gates in the IR.
-    """
-    checks = []
-    warnings = []
-    blockers = []
-    decisions = []
+    """Second deployment-focused pass. No artifact is considered releasable until this pass is complete."""
+    checks, warnings, blockers, decisions = [], [], [], []
     pkg = _package(repo)
     primary = result['summary'].get('primary_language')
     framework = result['summary'].get('framework')
     pm = result['summary'].get('package_manager')
+    spec.project['files'] = list(repo.files)
 
     def check(code, title, status, evidence=None, detail=''):
         item = {'code': code, 'title': title, 'status': status, 'evidence': evidence or [], 'detail': detail}
@@ -87,29 +73,20 @@ def analyze(repo, spec, result):
         scripts = pkg.get('scripts') or {}
         lock = LOCKFILES.get(pm)
         lock_present = bool(lock and lock in repo.file_set)
-        check(
-            'NODE_MANIFEST', 'Node package manifest', 'pass' if 'package.json' in repo.file_set else 'blocker',
-            ['package.json'] if 'package.json' in repo.file_set else [],
-            'package.json is the source of truth for scripts and dependencies.' if 'package.json' in repo.file_set else 'package.json is required.'
-        )
+        check('NODE_MANIFEST', 'Node package manifest', 'pass' if 'package.json' in repo.file_set else 'blocker',
+              ['package.json'] if 'package.json' in repo.file_set else [],
+              'package.json is the source of truth for scripts and dependencies.' if 'package.json' in repo.file_set else 'package.json is required.')
         if pm != 'Unknown' and lock:
             check('LOCKFILE_MATCH', 'Package manager and lockfile', 'pass' if lock_present else 'warning',
                   [lock] if lock_present else ['package.json'],
-                  f'{pm} lockfile detected.' if lock_present else f'No {lock} found; installation will use the package manager without frozen resolution.')
+                  f'{pm} lockfile detected.' if lock_present else f'No {lock} found; installation will use a non-frozen dependency resolution.')
         build = scripts.get('build')
-        if not build:
-            check('BUILD_SCRIPT', 'Production build command', 'blocker', ['package.json'], 'No package.json build script was found.')
-        else:
-            check('BUILD_SCRIPT', 'Production build command', 'pass', ['package.json'], f'Using repository script: {build}')
+        check('BUILD_SCRIPT', 'Production build command', 'pass' if build else 'blocker', ['package.json'],
+              f'Using repository script: {build}' if build else 'No package.json build script was found.')
         start = scripts.get('start')
         dev = scripts.get('dev')
-        preview = scripts.get('preview')
-        if start:
-            check('START_SCRIPT', 'Application start command', 'pass', ['package.json'], f'package.json start script: {start}')
-        elif dev:
-            check('START_SCRIPT', 'Application start command', 'warning', ['package.json'], 'No start script; dev script is available as a fallback only when the framework/runtime requires it.')
-        else:
-            check('START_SCRIPT', 'Application start command', 'blocker', ['package.json'], 'No start or dev script was found.')
+        check('START_SCRIPT', 'Application start command', 'pass' if start else ('warning' if dev else 'blocker'), ['package.json'],
+              f'package.json start script: {start}' if start else ('No start script; dev is available as a fallback.' if dev else 'No start or dev script was found.'))
         spec.runtime['version'] = _node_version(repo, pkg)
 
         if framework == 'Astro':
@@ -125,47 +102,45 @@ def analyze(repo, spec, result):
             elif '@astrojs/cloudflare' in deps or '@astrojs/cloudflare' in cfg:
                 adapter = 'cloudflare'
             output = 'server' if re.search(r"output\s*:\s*['\"]server['\"]", cfg) else ('hybrid' if re.search(r"output\s*:\s*['\"]hybrid['\"]", cfg) else 'static')
-            serverless_vercel = adapter == 'vercel' and ('serverless' in cfg or output in {'server', 'hybrid'})
-            preview_supported = adapter == 'node' or output == 'static'
-            adapter_evidence = [x for x in [cfg_file, 'package.json'] if x]
+            adapter_evidence = [x for x in (cfg_file, 'package.json') if x]
             check('ASTRO_CONFIG', 'Astro configuration', 'pass' if cfg_file else 'warning', adapter_evidence,
                   f'Astro adapter={adapter}, output={output}.')
+
             if adapter == 'vercel' and output in {'server', 'hybrid'}:
                 if not dev:
                     check('ASTRO_CONTAINER_RUNTIME', 'Container runtime compatibility', 'blocker', adapter_evidence,
-                          'Vercel SSR output cannot be served by a local Docker container without a Node-compatible adapter, and no dev script exists.')
+                          'Vercel SSR output cannot be locally served by astro preview; a dev script is required unless the project is converted to the Node adapter.')
                 else:
                     check('ASTRO_CONTAINER_RUNTIME', 'Container runtime compatibility', 'pass', adapter_evidence,
-                          'The Vercel SSR adapter targets Vercel; for a faithful local container, use the repository dev server rather than astro preview.')
-                    decisions.append({'code': 'ASTRO_VERCEL_DEV_RUNTIME', 'decision': 'use_dev_server', 'reason': 'Vercel serverless adapter does not provide a local preview server; repository dev script is the verified runnable entrypoint.'})
-                    spec.processes[0]['start_command'] = f'{pm if pm not in {"Unknown", "npm"} else "npm"} run dev -- --host 0.0.0.0 --port {{port}}'
+                          'Vercel SSR is preserved; Docker uses the repository dev server because the Vercel serverless adapter does not support astro preview.')
                     spec.build['runtime_strategy'] = 'dev-server-fallback'
                     spec.build['adapter'] = 'vercel-serverless'
-                    spec.build['preview_supported'] = preview_supported
+                    spec.build['preview_supported'] = False
+                    decisions.append({'code': 'ASTRO_VERCEL_DEV_RUNTIME', 'decision': 'use_dev_server', 'reason': 'Vercel serverless adapter is host-specific; use the repository dev server for a runnable local container.'})
             elif adapter == 'node' and output in {'server', 'hybrid'}:
                 check('ASTRO_CONTAINER_RUNTIME', 'Node SSR runtime', 'pass', adapter_evidence,
-                      'Astro Node adapter supports a standalone Node server for Docker.')
-                decisions.append({'code': 'ASTRO_NODE_STANDALONE', 'decision': 'node_dist_entry', 'reason': 'Node adapter provides a Docker-compatible server entrypoint.'})
+                      'Astro Node adapter provides a Docker-compatible Node server entrypoint.')
                 spec.build['runtime_strategy'] = 'node-standalone'
                 spec.build['adapter'] = 'node'
                 spec.build['preview_supported'] = True
+                decisions.append({'code': 'ASTRO_NODE_STANDALONE', 'decision': 'node_dist_entry', 'reason': 'Node adapter supplies dist/server/entry.mjs.'})
             elif output == 'static':
                 check('ASTRO_CONTAINER_RUNTIME', 'Static runtime compatibility', 'pass', adapter_evidence,
-                      'Static Astro output can be served by a static web server or Astro preview for local validation.')
+                      'Static Astro output can be served with the preview server for local validation.')
                 spec.build['runtime_strategy'] = 'static'
                 spec.build['adapter'] = adapter
                 spec.build['preview_supported'] = True
 
-            port = _port_from_text(cfg) or _port_from_text(pkg.get('scripts', {}).get('dev', ''))
+            port = _port_from_text(cfg) or _port_from_text(scripts.get('dev', ''))
             if not port:
                 readme = _first_file(repo, {'README.md', 'readme.md'})
                 port = _port_from_text(repo.read(readme)) if readme else None
-            if not port:
-                port = 4321
+            port = port or 4321
             spec.network['port'] = port
-            decisions.append({'code': 'PORT', 'decision': port, 'reason': 'Resolved from Astro configuration/scripts/README, otherwise Astro default 4321.'})
+            if adapter == 'vercel' and output in {'server', 'hybrid'} and dev:
+                spec.processes[0]['start_command'] = f'{pm if pm not in {"Unknown", "npm"} else "npm"} run dev -- --host 0.0.0.0 --port {port}'
+            decisions.append({'code': 'PORT', 'decision': port, 'reason': 'Resolved from Astro configuration, dev script, README, or Astro default 4321.'})
             check('PORT', 'Application port', 'pass', [cfg_file or 'package.json'], f'Container port resolved to {port}.')
-
         else:
             port = _port_from_text(repo.corpus) or spec.network.get('port') or 3000
             spec.network['port'] = port
@@ -178,28 +153,21 @@ def analyze(repo, spec, result):
         if result['summary'].get('start_command') == 'Not detected':
             check('PYTHON_ENTRYPOINT', 'Python application entrypoint', 'blocker', [], 'No deterministic Python web entrypoint was identified.')
 
-    monorepo = bool(spec.project.get('monorepo'))
-    if monorepo:
+    if spec.project.get('monorepo'):
         check('MONOREPO_TARGET', 'Monorepo deployment target', 'blocker', spec.infrastructure.get('files', []),
-              'The repository contains workspace/monorepo markers but no selected deployable workspace. Docker generation must not guess the target package.')
+              'Workspace/monorepo markers exist but no deployable workspace was selected; Docker generation must not guess.')
 
     if 'Dockerfile' in repo.file_set:
         check('EXISTING_DOCKERFILE', 'Existing Dockerfile', 'warning', ['Dockerfile'],
-              'An existing Dockerfile was found. It is treated as evidence, not copied blindly into the generated artifact.')
+              'Existing Dockerfile is evidence only and is not copied blindly into the generated artifact.')
 
     if spec.environment.get('secret_files'):
         check('SECRET_FILES', 'Repository secret files', 'warning', spec.environment['secret_files'],
-              'Secret-bearing environment files were detected. They must not be copied into the image.')
+              'Secret-bearing environment files were detected and must not enter the image.')
 
-    # The generator is released only when every required decision is deterministic.
-    confidence = 100
-    if warnings:
-        confidence -= min(20, len(warnings) * 3)
-    if blockers:
-        confidence = 0
-    ready = not blockers
+    confidence = 100 - min(20, len(warnings) * 3) if not blockers else 0
     result['deep_analysis'] = {
-        'status': 'ready' if ready else 'blocked',
+        'status': 'ready' if not blockers else 'blocked',
         'confidence': confidence,
         'checks': checks,
         'warnings': warnings,
