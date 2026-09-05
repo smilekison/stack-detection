@@ -1,7 +1,7 @@
 from pathlib import Path
 import hashlib, json
 
-IGNORE = {'.git','node_modules','vendor','.venv','venv','__pycache__','.next','dist','build','target','.terraform','.gradle','.idea','.vscode','coverage','bin','obj','.pytest_cache','.mypy_cache','.tox','.cache','.pnpm-store','.yarn'}
+IGNORE = {'.git','node_modules','vendor','.venv','venv','env','__pycache__','.next','dist','build','target','.terraform','.gradle','.idea','.vscode','coverage','bin','obj','.pytest_cache','.mypy_cache','.tox','.cache','.pnpm-store','.yarn'}
 TEXT_EXT = {'.js','.jsx','.ts','.tsx','.mjs','.cjs','.py','.go','.rs','.java','.kt','.kts','.cs','.php','.rb','.swift','.dart','.scala','.sh','.bash','.md','.json','.yaml','.yml','.toml','.xml','.gradle','.properties','.env','.ini','.conf','.tf','.tfvars','.sql','.lock'}
 MAX_FILE_BYTES = 2_000_000
 MAX_TEXT_BYTES = 250_000

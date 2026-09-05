@@ -237,7 +237,9 @@ def analyze(repo,spec,result,target=None):
         else: start=""; strategy=None
         readme_start=next((c["command"] for c in readme["commands"]["start"]["production"]),None)
         if entry and readme_start:
-            start,contradiction=_reconcile_command(start,readme_start)
+            # README (Tier 2) outranks a naming-convention-derived entrypoint guess (Tier 3):
+            # when they agree on the tool, the documented command is authoritative, not our guess.
+            start,contradiction=_reconcile_command(readme_start,start)
             if contradiction: check("EVIDENCE_RECONCILIATION","Production command reconciliation","blocker",[entry],f"README documents a different production command ('{readme_start}') than the resolved entrypoint command ('{start}'); refusing to guess.")
         if entry: spec.build.update({"runtime_strategy":strategy,"entrypoint":entry}); spec.processes[0]["start_command"]=start; check("ENTRYPOINT","Python web entrypoint","pass",[entry],start)
         elif readme_start:

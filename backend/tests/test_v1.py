@@ -26,3 +26,6 @@ def test_generators_and_pricing(tmp_path):
  r=fixture(tmp_path);spec,_,_=Analyzer(r).analyze();spec.services=[{'name':'PostgreSQL'}];assert 'USER 10001' in dockerfile(spec);assert 'aws_ecs_cluster' in terraform(spec,'aws');assert 'Deployment' in kubernetes(spec);assert PricingEngine().estimate(spec,'aws')['estimated_monthly_usd']>0
 def test_diagnosis():
  assert diagnose('Cannot find module express')['code']=='missing_module';assert diagnose('permission denied /app/app')['code']=='permission'
+def test_migration_detector_source_cannot_flag_itself(tmp_path):
+ (tmp_path/'requirements.txt').write_text('fastapi\n');(tmp_path/'app/migrations.py').parent.mkdir();(tmp_path/'app/migrations.py').write_text("FRAMEWORKS=[('Django','migrations/')]\nDESTRUCTIVE=[('DB_DESTROY',r'destroy_all')]\n")
+ m=migration_analyze(Repository(tmp_path));assert m['systems']==[];assert not m['requires_manual_approval'];assert m['destructive_changes']==[]
