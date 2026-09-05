@@ -1,0 +1,1 @@
+v1.0.0 dashboard status: the FastAPI service serves `/` and the dashboard consumes `/analyze-stream`, `/generate/dockerfile`, and `/generate/docker-compose`. The analysis trace is streamed from a background worker through a queue so events are emitted as each pipeline stage completes, rather than replayed after analysis finishes.
