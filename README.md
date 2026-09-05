@@ -1,94 +1,170 @@
-# AutoDeploy Stack Detection Engine
+# Stack Detection Engine
 
-An independent, **AI-free repository intelligence prototype** for turning a GitHub repository into an evidence-backed deployment specification and starter Docker artifacts.
+An independent, AI-free repository intelligence prototype for turning a software repository into an evidence-backed deployment specification and generated container/infrastructure artifacts.
 
-## Core idea
+> Goal: prove the repository → stack detection → deployment IR → Docker → validation architecture before integrating it into AutoDeploy.
+
+## Architecture
 
 ```text
-GitHub repository
-        ↓
+Repository URL / ZIP
+        |
+        v
 Repository Scanner
-        ↓
-Deterministic Detection Engine
-        ↓
-Evidence Ledger + Confidence
-        ↓
-Deployment IR
-        ↓
-Dockerfile / Compose / .dockerignore
+        |
+        +--> manifests / lockfiles
+        +--> source files
+        +--> CI/CD
+        +--> Docker / Kubernetes / Terraform
+        +--> runtime/version files
+        |
+        v
+Detector Registry
+        |
+        +--> languages
+        +--> runtimes
+        +--> package managers
+        +--> frameworks
+        +--> databases/caches/queues
+        +--> application roles
+        +--> entrypoints/build commands
+        +--> ports/health endpoints
+        +--> environment variables
+        +--> monorepo topology
+        |
+        v
+Evidence Engine
+        |
+        +--> weighted signals
+        +--> confidence
+        +--> conflicts
+        |
+        v
+Deployment IR (versioned JSON)
+        |
+        +--> Dockerfile
+        +--> Compose
+        +--> Kubernetes
+        +--> Terraform starting point
+        |
+        v
+Validation
+        |
+        +--> static checks
+        +--> docker build (when Docker is available)
+        +--> container startup diagnostics
+        +--> health/smoke validation hooks
+        |
+        v
+Security review + deterministic repair analysis
 ```
 
-The engine does **not** require OpenAI, Claude, Gemini, or any external AI API key.
+No OpenAI, Claude, Gemini, or other hosted AI API is required.
 
-## What it detects
+## What is detected
 
 ### Programming languages
+
 - JavaScript
 - TypeScript
 - Python
 - Go
 - Rust
-- Java / JVM
-- C# / .NET
-- PHP
+- Java/JVM
+- C#/.NET
 - Ruby
-- Swift
-- Dart
-- Elixir
+- PHP
 
-### Runtimes and versions
-- Node.js via `.nvmrc`, `.node-version`, `package.json.engines`
+Detection uses multiple signals rather than one filename. Examples include manifests, lockfiles and source extensions.
+
+### Runtime and version
+
+- Node.js via `.nvmrc`, `.node-version`, `package.json` engines
 - Python via `.python-version`, `runtime.txt`, `pyproject.toml`
 - Go via `go.mod`
-- Java via Maven configuration
-- .NET via `TargetFramework`
+- Ruby via `.ruby-version`
+- Rust/Java/.NET runtime families
 
-### Package managers / build systems
+The engine records whether a version was explicitly declared or had to be defaulted by the generator.
+
+### Package managers / dependency systems
+
 - npm
 - pnpm
 - Yarn
 - Bun
 - pip
+- Pipenv
 - Poetry
 - uv
-- Pipenv
 - Go modules
 - Cargo
-- Maven
-- Gradle
-- Composer
 - Bundler
+- Composer
 
-### Frameworks
-- Next.js
-- Nuxt
-- NestJS
+Lockfiles receive strong evidence weight. A `packageManager` declaration in `package.json` can override weaker lockfile evidence.
+
+### Frameworks and application tooling
+
+Node ecosystem:
+
 - Express
+- NestJS
 - Fastify
 - Koa
 - Hono
+- Next.js
 - Remix
-- SvelteKit
-- Angular
+- Nuxt
 - React
 - Vue
-- Vite
+- Angular
+- Svelte
 - Astro
-- Django
+- Vite
+- Electron
+- Socket.IO
+
+Python:
+
 - FastAPI
+- Django
 - Flask
-- Litestar
-- Sanic
+- Starlette
 - Tornado
+- Streamlit
+- Celery
+
+Go:
+
 - Gin
 - Echo
 - Fiber
 - Chi
+
+Rust:
+
+- Actix Web
+- Axum
+- Rocket
+- Warp
+
+JVM:
+
 - Spring Boot
 - Quarkus
 - Micronaut
 
-### Data stores / infrastructure integrations
+.NET:
+
+- ASP.NET Core
+
+The detector keeps alternatives instead of silently throwing away competing framework evidence.
+
+### Data stores, caches, queues and integrations
+
+Signals cover:
+
 - PostgreSQL
 - MySQL
 - MariaDB
@@ -96,96 +172,180 @@ The engine does **not** require OpenAI, Claude, Gemini, or any external AI API k
 - Redis
 - RabbitMQ
 - Kafka
-- Elasticsearch / OpenSearch
-- S3 / object storage
-- Supabase
-- Firebase
-- Stripe
+- SQLite
+- Elasticsearch
+- DynamoDB
+- S3/object storage
 
-### Architecture signals
-- Monorepo/workspaces
-- Web application
-- Background workers
-- Schedulers / cron
-- Message consumers
-- Health/readiness endpoints
-- Environment variables
-- Existing Docker / Compose configuration
-- Terraform / Helm / Kubernetes / CI/CD files
+These are repository signals, not claims that a production database should automatically be provisioned. The Deployment IR separates detection from provisioning decisions.
 
-### Deployment evidence
-The detector records the repository evidence behind each important decision, including:
+### Architecture / service roles
+
+- API
+- frontend
+- worker
+- scheduler
+- consumer
+- process manager signals such as PM2/Gunicorn
+- server signals such as Uvicorn
+- monorepo
+
+### CI/CD and infrastructure
+
+- GitHub Actions
+- GitLab CI
+- Jenkins
+- Azure Pipelines
+- Bitbucket Pipelines
+- Docker
+- Docker Compose
+- Terraform
+- Kubernetes/Helm
+- Serverless configuration
+
+### Environment variables
+
+The scanner extracts referenced variable names from common Node/Python patterns and `${VAR}` references. It never copies actual secret values into generated Dockerfiles.
+
+### Ports and health
+
+The engine looks for explicit port configuration and then uses framework defaults only as lower-confidence evidence.
+
+Health route signals include:
+
+- `/health`
+- `/healthz`
+- `/ready`
+- `/readiness`
+- `/live`
+- `/liveness`
+
+## Evidence model
+
+Every important detection can carry:
 
 ```json
 {
-  "points": 40,
-  "file": ".nvmrc",
-  "reason": "Node runtime version explicitly declared",
-  "category": "runtime"
+  "points": 60,
+  "file": "go.mod",
+  "reason": "Go module manifest",
+  "category": "language"
 }
 ```
 
-This makes the system explainable instead of returning a black-box answer.
+The result contains:
+
+- detected value
+- alternatives
+- weighted evidence
+- confidence score
+- conflicts
+
+This is intentionally designed so the engine can answer why it made a deployment decision.
 
 ## Deployment IR
 
-The engine normalizes detection into an intermediate representation containing:
+The normalized representation is the boundary between analysis and artifact generation.
 
-- project / monorepo structure
-- application roles
-- language and runtime
-- runtime version
-- package manager
-- framework
-- build command
-- build output
-- start command
-- network port
-- health endpoint
-- external services
-- environment variables
-- CI/CD signals
-- existing deployment files
-- generated Docker artifacts
+Example shape:
 
-The IR is deliberately independent of Docker so that future generators can target:
-
-```text
-Deployment IR
-   ├── Dockerfile
-   ├── Compose
-   ├── Terraform
-   ├── Kubernetes
-   ├── ECS
-   └── Cloud provider resources
+```json
+{
+  "schema_version": "1.0",
+  "runtime": {
+    "language": "TypeScript",
+    "runtime": "Node.js",
+    "version": "20",
+    "package_manager": "pnpm"
+  },
+  "framework": {
+    "name": "Express"
+  },
+  "build": {
+    "command": "pnpm build",
+    "output": "dist/"
+  },
+  "start": {
+    "command": "node dist/server.js"
+  },
+  "network": {
+    "port": 3000
+  },
+  "services": ["PostgreSQL", "Redis"],
+  "environment": {
+    "variables": ["DATABASE_URL", "REDIS_URL"]
+  }
+}
 ```
 
-## Docker generation
+Keeping this IR separate means Docker, Compose, Kubernetes and cloud-specific generators can evolve independently.
 
-Supported starter production templates currently include:
+## Generated artifacts
 
-- Node.js / TypeScript
-- Python
-- Go
-- Rust
-- Java/Maven
-- Java/Gradle
-- .NET
+The prototype generates:
 
-The generator uses multi-stage images where appropriate, production dependency installation, non-root runtime where practical, exposed ports, and explicit entrypoints.
+- `Dockerfile`
+- `.dockerignore`
+- `compose.yaml`
+- `kubernetes/deployment.yaml`
+- `terraform/main.tf`
 
-For unknown or ambiguous stacks the system intentionally refuses to invent a production Dockerfile and returns a warning. This is a design principle: **uncertainty should be surfaced, not hidden.**
+Docker templates include multi-stage builds for common compiled Node workloads, non-root runtime users where practical, explicit ports and health-check support.
+
+Generated infrastructure is intentionally conservative. It is a starting point, not an automatic production approval.
+
+## Validation
+
+When Docker is installed in the environment running the backend, the engine can:
+
+1. Write the generated Dockerfile into the temporary repository.
+2. Run `docker build`.
+3. Capture stdout/stderr and exit codes.
+4. Start the image briefly for runtime diagnostics.
+5. Return validation information to the UI.
+
+If Docker is unavailable, analysis still works and explicitly reports that build validation was skipped.
+
+### Safety boundary
+
+The current validator is intended for repositories you have permission to analyze. A production AutoDeploy implementation should execute builds in a hardened, isolated worker/sandbox with:
+
+- CPU/memory/time limits
+- no host Docker socket exposure
+- restricted network egress
+- ephemeral filesystem
+- dropped privileges/capabilities
+- image and dependency scanning
+- secret redaction
+
+Do not expose the development Compose Docker socket setup to untrusted users.
+
+## Deterministic repair strategy
+
+The prototype records unresolved areas and produces conservative fallbacks. The intended production loop is:
+
+```text
+Generate
+   -> build
+   -> inspect failure
+   -> classify failure
+   -> collect additional repository evidence
+   -> modify Deployment IR
+   -> regenerate
+   -> rebuild
+```
+
+The repair layer should only make deterministic changes that are supported by repository evidence. An optional local or hosted LLM can later be plugged into ambiguous diagnosis, but it is not a dependency of the core engine.
 
 ## Run locally
+
+### Backend
 
 Requirements:
 
 - Python 3.11+
-- Node.js 20+
 - Git
 - Docker optional
-
-### Backend
 
 ```bash
 cd backend
@@ -194,7 +354,7 @@ python -m venv .venv
 
 Windows:
 
-```powershell
+```bash
 .venv\\Scripts\\activate
 ```
 
@@ -213,63 +373,81 @@ uvicorn main:app --reload --port 8000
 
 ### Frontend
 
+Requirements:
+
+- Node.js 20+
+
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-Open the Vite URL shown in the terminal, normally `http://localhost:5173`.
+Open the Vite URL, normally `http://localhost:5173`.
 
-Paste a public GitHub repository URL and click **Analyze repository**.
+Paste a public GitHub URL and choose Analyze repository.
+
+### ZIP input
+
+The backend also exposes:
+
+```text
+POST /analyze-zip
+```
+
+with a multipart ZIP upload, which makes the prototype usable without GitHub access.
 
 ## API
 
-`POST /analyze`
+### `GET /health`
+
+Returns engine status and confirms that AI is not required.
+
+### `POST /analyze`
 
 ```json
 {
-  "repo_url": "https://github.com/owner/repository"
+  "repo_url": "https://github.com/owner/repo",
+  "validate_docker": true,
+  "generate_infrastructure": true
 }
 ```
 
-The response contains:
+### `POST /analyze-zip`
 
-```text
-summary
-evidence
-files
-generated_files
-deployment_ir
-```
+Multipart upload field: `file=<repository.zip>`.
 
-## Architecture roadmap
+Optional query parameters: `validate_docker=true` and `generate_infrastructure=true`.
 
-This repository is intentionally an independent testbed before integration into AutoDeploy.
+## Production roadmap
 
-Next engineering layers:
+This independent prototype establishes the architecture. The next hardening stages are:
 
-1. Detector registry with independently versioned fingerprints.
-2. AST parsing for JavaScript/TypeScript, Python, Go, Java and C#.
-3. Better conflict resolution across manifests, CI and existing Dockerfiles.
-4. Private GitHub OAuth / installation support.
-5. ZIP upload support.
-6. Isolated Docker build sandbox.
-7. Container startup and health validation.
-8. Build-error classification and automatic repair.
-9. SBOM and vulnerability scanning.
-10. Terraform / Kubernetes / ECS generators.
-11. Cost-estimation model.
-12. Optional local-LLM fallback for low-confidence ambiguity only.
+1. Split detectors into a registry/plugin system.
+2. Add language-aware AST parsers instead of relying primarily on regex/source heuristics.
+3. Add complete lockfile and dependency graph analysis.
+4. Trace entrypoints through scripts, imports and framework conventions.
+5. Detect multiple deployable services in monorepos.
+6. Add migration detection and destructive-operation classification.
+7. Add a real isolated build sandbox.
+8. Add container health/smoke testing with controlled networking.
+9. Add deterministic failure classifiers and evidence-backed repair iterations.
+10. Add Trivy/Grype or equivalent vulnerability scanning in a controlled worker.
+11. Add SBOM generation.
+12. Add secret detection and redaction.
+13. Add provider-specific Terraform modules for AWS/GCP/Azure.
+14. Add ECS/Fargate, Kubernetes and serverless deployment targets.
+15. Add cloud cost estimation from the Deployment IR.
+16. Add policy gates for security, cost and production approval.
+17. Add optional local-model inference for genuinely ambiguous repositories.
+18. Add a signed, versioned detector/template registry.
+19. Add regression fixtures covering hundreds of real-world repositories.
+20. Integrate the engine into AutoDeploy only after the independent test suite is stable.
 
-## Safety principles
+## Design principle
 
-- Never place secrets in generated Dockerfiles.
-- Do not claim a technology is present without repository evidence.
-- Do not silently override conflicting runtime declarations.
-- Do not execute destructive database migrations automatically.
-- Do not generate unsafe production infrastructure when confidence is too low.
+The core product is not an AI that writes Dockerfiles.
 
-## License
+It is a repository intelligence engine that converts evidence into a normalized deployment specification, then deterministically generates and validates infrastructure from that specification.
 
-Use this prototype as the foundation for your own development and testing.
+AI can be an optional accelerator. It should never be required to understand a repository that already contains enough machine-readable evidence to understand itself.
