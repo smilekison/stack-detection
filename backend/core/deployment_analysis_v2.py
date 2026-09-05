@@ -154,7 +154,8 @@ def _dotnet(repo,unit):
 def _php(repo,unit):
     files=_files(repo,unit); composer=next((f for f in files if Path(f).name=="composer.json"),unit.get("manifest")); content=_read(repo,composer); framework=_framework_from_text(PHP_FRAMEWORKS,content,scoped_text(repo,unit,suffixes={".php"}))
     public=any(Path(f).name=="index.php" and "public" in Path(f).parts for f in files); index=any(Path(f).name=="index.php" for f in files)
-    return composer, framework, (public or index), public
+    version_match=re.search(r'"php"\s*:\s*"([^"]+)"',content)
+    return composer, framework, (public or index), public, (version_match.group(1) if version_match else None)
 
 
 def _ruby(repo,unit):
@@ -223,16 +224,46 @@ def analyze(repo,spec,result,target=None):
         candidates=[]
         for e in selected.get("ecosystems",[]):
             if e=="node":
-                _,pkg,_,fw,scripts,pm,_,lock=_node(repo,selected); candidates.append((bool(scripts.get("build") or scripts.get("start") or scripts.get("dev")),e,fw,scripts))
+                _,pkg,_,fw,scripts,pm,_,lock=_node(repo,selected); candidates.append((bool(scripts.get("build") or scripts.get("start") or scripts.get("dev")),e,fw,{**scripts,"_pm":pm,"_lock":lock}))
             elif e=="python":
                 ms,fw=_python(repo,selected); candidates.append((bool(ms),e,fw,{}))
             elif e=="go":
                 target,fw=_go(repo,selected); candidates.append((bool(target),e,fw,{}))
             elif e=="rust":
                 candidates.append((True,e,*_rust(repo,selected)[1:],{}))
+            elif e=="php":
+                # A PHP backend (Laravel, most commonly) commonly ships its own package.json
+                # purely to compile frontend assets with Vite - that made Node look like the
+                # only "viable" ecosystem here before, silently discarding the real backend
+                # and generating a static-nginx site instead of the actual application.
+                _,fw,web,_,_=_php(repo,selected); candidates.append((bool(web),e,fw,{}))
+            elif e=="ruby":
+                fw,rails,rack=_ruby(repo,selected); candidates.append((bool(rails or rack),e,fw,{}))
+            elif e in {"jvm","scala"}:
+                _,fw=_jvm(repo,selected); candidates.append((fw in {"Spring Boot","Quarkus","Micronaut","Ktor","Play Framework"},e,fw,{}))
+            elif e in {"dotnet","fsharp","vbnet"}:
+                project,_,_,fw=_dotnet(repo,selected); candidates.append((bool(project and (fw or e=="dotnet")),e,fw,{}))
             else: candidates.append((False,e,None,{}))
         viable=[x for x in candidates if x[0]]
         if len(viable)==1: eco=viable[0][1]; language=LANGUAGE_NAMES.get(eco,eco)
+        elif len(viable)>1:
+            # A Node candidate with no start script (build and/or dev only - `vite` local
+            # hot-reload counts as dev, not production) has no way to run as its own server in
+            # production - matches how a bare `dev`-only Node unit already blocks elsewhere in
+            # this file outside the polyglot case. It's an asset-compilation companion sharing
+            # the root with a real backend (Laravel+Vite, Rails+esbuild, ...), not a rival
+            # application. When exactly one other ecosystem is independently viable, it wins.
+            build_only_node=[x for x in viable if x[1]=="node" and not x[3].get("start")]
+            rest=[x for x in viable if x not in build_only_node]
+            if build_only_node and len(rest)==1:
+                eco=rest[0][1]; language=LANGUAGE_NAMES.get(eco,eco)
+                # The winning backend may still need this companion's build OUTPUT at runtime
+                # (Laravel's Blade views reference Vite-compiled assets via @vite()) even
+                # though Node itself was correctly ruled out as the deployment target - record
+                # what's needed to build it so the backend's own generator can fold it in.
+                companion=build_only_node[0][3]
+                if companion.get("build"): spec.build["frontend_build"]={"package_manager":companion.get("_pm") or "npm","lockfile":companion.get("_lock")}
+            else: check("POLYGLOT_TARGET","Polyglot target","blocker",selected.get("manifests",[]),"Multiple ecosystems exist in the same application root and no single executable target is provable.")
         else: check("POLYGLOT_TARGET","Polyglot target","blocker",selected.get("manifests",[]),"Multiple ecosystems exist in the same application root and no single executable target is provable.")
 
     if not blockers and eco=="node":
@@ -321,8 +352,8 @@ def analyze(repo,spec,result,target=None):
     elif not blockers and eco=="php":
         # PHP's Apache runtime always listens on 80 inside the container regardless of what a
         # README documents for local `php -S` development - README port evidence does not apply here.
-        composer,framework,web,public=_php(repo,selected); language="PHP"; port=80
-        if web: strategy="php-apache"; start="apache2-foreground"; spec.runtime={"name":"PHP","version":"8.3"}; spec.build.update({"runtime_strategy":strategy,"document_root":"public" if public else ".","dependency_manifest":composer})
+        composer,framework,web,public,php_version=_php(repo,selected); language="PHP"; port=80
+        if web: strategy="php-apache"; start="apache2-foreground"; spec.runtime={"name":"PHP","version":php_version or "8.3"}; spec.build.update({"runtime_strategy":strategy,"document_root":"public" if public else ".","dependency_manifest":composer})
         else: check("ENTRYPOINT","PHP web entrypoint","blocker",[composer] if composer else [],"No deterministic PHP web entrypoint.")
 
     elif not blockers and eco=="ruby":

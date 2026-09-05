@@ -21,6 +21,16 @@ def _tag(value, default):
     return m.group(1) + (("." + m.group(2) + (("." + m.group(3)) if m.group(3) else "")) if m.group(2) else "")
 
 
+def _php_tag(value, default="8.3"):
+    """PHP's official images, unlike Node's, never publish a bare-MAJOR tag (no `php:8`) -
+    MAJOR.MINOR is the shortest valid one, so _tag()'s range fallback to major-only would
+    itself produce an invalid tag here. Composer version constraints ("^8.3", ">=8.4.1",
+    "8.2.*") all still contain a real MAJOR.MINOR pair; take that regardless of the operator.
+    """
+    m = re.search(r"(\d+)\.(\d+)", str(value or ""))
+    return f"{m.group(1)}.{m.group(2)}" if m else default
+
+
 def _pm_info(spec):
     pm = spec.package_managers[0] if spec.package_managers else {}
     return pm.get("name", "npm"), pm.get("version", ""), pm.get("evidence_file", "")
@@ -106,11 +116,41 @@ def dockerfile(spec):
         name = spec.build.get("assembly") or Path(project).stem; tfm = str(spec.runtime.get("version", "net8.0")); m = re.search(r"net(\d+)(?:\.(\d+))?", tfm, re.I); net = f"{m.group(1)}.{m.group(2) or '0'}" if m else "8.0"
         return f'''FROM mcr.microsoft.com/dotnet/sdk:{net} AS build\nWORKDIR /src\nCOPY . .\nRUN dotnet restore {project}\nRUN dotnet publish {project} -c Release --no-restore -o /out\nFROM mcr.microsoft.com/dotnet/aspnet:{net}\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nCOPY --from=build --chown=10001:10001 /out .\nUSER 10001\nENV ASPNETCORE_URLS=http://0.0.0.0:{port} HOME=/app\nEXPOSE {port}\nENTRYPOINT ["dotnet", "/app/{name}.dll"]\n'''
     if rt == "PHP":
-        root = spec.build.get("document_root", ".")
+        root = spec.build.get("document_root", "."); php = _php_tag(spec.runtime.get("version"))
         if "composer.json" in files:
             doc = "/var/www/html/public" if root == "public" else "/var/www/html"; lock = "COPY composer.lock ./\n" if "composer.lock" in files else ""; rewrite = f"ENV APACHE_DOCUMENT_ROOT={doc}\nRUN sed -ri 's!/var/www/html!{doc}!g' /etc/apache2/sites-available/000-default.conf /etc/apache2/apache2.conf\n" if root == "public" else ""
-            return f'''FROM composer:2 AS deps\nWORKDIR /app\nCOPY composer.json ./\n{lock}RUN composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader\nFROM php:8.3-apache\nWORKDIR /var/www/html\nRUN a2enmod rewrite\nCOPY --from=deps /app/vendor ./vendor\nCOPY . .\n{rewrite}EXPOSE 80\nCMD ["apache2-foreground"]\n'''
-        return 'FROM php:8.3-apache\nWORKDIR /var/www/html\nCOPY . .\nEXPOSE 80\nCMD ["apache2-foreground"]\n'
+            # --no-scripts: Laravel's `artisan package:discover` (a post-autoload-dump hook)
+            # needs the full application source, which isn't copied into this stage, only the
+            # manifest - composer install would fail outright otherwise. The optimized
+            # autoloader itself (--optimize-autoloader) is a core composer feature, not a
+            # script, and still gets built correctly. But skipping the hook isn't just a lost
+            # cache warm-up as it first looks: without the resulting package manifest cache,
+            # Laravel fails to register core service providers at all (`Target class [view]
+            # does not exist`) - it must be re-run once the real app is present, below.
+            laravel = "artisan" in files
+            writable = "RUN chown -R www-data:www-data storage bootstrap/cache\n" if laravel else ""
+            discover = "RUN php artisan package:discover --ansi\n" if laravel else ""
+            # COPY . . must run BEFORE the vendor copy, not after: a local dev environment
+            # almost always already has its own vendor/ sitting in the build context (from
+            # running composer locally, dev deps included), and COPY . . would otherwise
+            # silently clobber the correctly `--no-dev`-installed vendor/ from the deps stage
+            # with that one - the exact failure mode this order avoids.
+            # A build-only Node companion (Vite, most commonly) that lost the polyglot
+            # tie-break to this PHP backend still needs its own build to run: Laravel's
+            # Blade views reference the compiled manifest via @vite(), and without it the
+            # page 500s even though the PHP side is entirely correct. Folded in as its own
+            # stage rather than assumed away, using the same package-manager evidence
+            # already resolved for the companion (npm/pnpm/yarn/bun, with or without a
+            # lockfile) instead of hardcoding npm.
+            frontend = spec.build.get("frontend_build")
+            assets_stage = assets_copy = ""
+            if frontend:
+                node_pm = frontend.get("package_manager") or "npm"; node_lock = frontend.get("lockfile")
+                node_install = {"pnpm":"pnpm install --frozen-lockfile","yarn":"yarn install --immutable","bun":"bun install --frozen-lockfile"}.get(node_pm, "npm ci") if node_lock else {"pnpm":"pnpm install","yarn":"yarn install","bun":"bun install"}.get(node_pm, "npm install")
+                assets_stage = f'''FROM node:20-bookworm-slim AS assets\nWORKDIR /app\nCOPY package.json{(" " + node_lock) if node_lock else ""} ./\nRUN {node_install}\nCOPY . .\nRUN {node_pm} run build\n'''
+                assets_copy = "COPY --from=assets --chown=www-data:www-data /app/public/build ./public/build\n"
+            return f'''{assets_stage}FROM composer:2 AS deps\nWORKDIR /app\nCOPY composer.json ./\n{lock}RUN composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader --no-scripts\nFROM php:{php}-apache\nWORKDIR /var/www/html\nRUN a2enmod rewrite\nCOPY . .\nCOPY --from=deps /app/vendor ./vendor\n{assets_copy}{writable}{discover}{rewrite}EXPOSE 80\nCMD ["apache2-foreground"]\n'''
+        return f'FROM php:{php}-apache\nWORKDIR /var/www/html\nCOPY . .\nEXPOSE 80\nCMD ["apache2-foreground"]\n'
     if rt == "Ruby":
         if not start: raise ValueError("No verified Ruby runtime command was resolved.")
         ruby = _tag(spec.runtime.get("version"), "3.3"); lock = "COPY Gemfile.lock ./\n" if "Gemfile.lock" in files else ""
