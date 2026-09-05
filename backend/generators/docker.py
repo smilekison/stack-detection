@@ -24,7 +24,7 @@ def dockerfile(spec):
 
     if rt == 'Node.js':
         pm, setup, manifest_copy, install = _node_install(spec)
-        build = spec.build.get('command') or 'npm run build'
+        build = spec.build.get('container_command') or 'npm run build'
 
         if fw == 'Astro' and strategy == 'dev-server-fallback':
             command = f'{pm} run dev -- --host 0.0.0.0 --port {port}'
