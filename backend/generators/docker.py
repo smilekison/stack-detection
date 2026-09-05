@@ -88,7 +88,13 @@ def dockerfile(spec):
     if rt == "Ruby":
         if not start: raise ValueError("No verified Ruby runtime command was resolved.")
         ruby = _tag(spec.runtime.get("version"), "3.3"); lock = "COPY Gemfile.lock ./\n" if "Gemfile.lock" in files else ""
-        return f'''FROM ruby:{ruby}-slim\nWORKDIR /app\nCOPY Gemfile ./\n{lock}RUN bundle install\nCOPY . .\n{_user()}\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
+        # Rack 3 split the `rackup` executable into its own gem. A Gemfile pinning only
+        # `rack` no longer guarantees `bundle exec rackup` resolves - a known package
+        # installation issue (PROGRAM.md's bounded-repair class). The fix must run after
+        # `COPY . .`: that copy brings back the host's original Gemfile, overwriting any
+        # patch applied earlier, so patching before it would silently be undone.
+        ensure_rackup = "RUN grep -q rackup Gemfile || echo \"gem 'rackup'\" >> Gemfile && bundle install\n" if strategy == "ruby-rack" else ""
+        return f'''FROM ruby:{ruby}-slim\nWORKDIR /app\nCOPY Gemfile ./\n{lock}RUN bundle install\nCOPY . .\n{ensure_rackup}{_user()}\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
     raise ValueError(f"No verified Docker generation strategy for runtime={rt}, strategy={strategy}")
 
 
