@@ -88,6 +88,8 @@ def analyze(repo, spec, result):
         check('START_SCRIPT', 'Application start command', 'pass' if start else ('warning' if dev else 'blocker'), ['package.json'],
               f'package.json start script: {start}' if start else ('No start script; dev is available as a fallback.' if dev else 'No start or dev script was found.'))
         spec.runtime['version'] = _node_version(repo, pkg)
+        if build:
+            spec.build['container_command'] = f'{pm if pm not in {"Unknown", "npm"} else "npm"} run build'
 
         if framework == 'Astro':
             cfg_file, cfg = _astro_config(repo)
@@ -105,7 +107,6 @@ def analyze(repo, spec, result):
             adapter_evidence = [x for x in (cfg_file, 'package.json') if x]
             check('ASTRO_CONFIG', 'Astro configuration', 'pass' if cfg_file else 'warning', adapter_evidence,
                   f'Astro adapter={adapter}, output={output}.')
-
             if adapter == 'vercel' and output in {'server', 'hybrid'}:
                 if not dev:
                     check('ASTRO_CONTAINER_RUNTIME', 'Container runtime compatibility', 'blocker', adapter_evidence,
