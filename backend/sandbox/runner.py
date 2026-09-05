@@ -14,11 +14,7 @@ class Sandbox:
   build=self.run(['docker','build','--progress=plain','--network=default','--pull','--no-cache','-f',dockerfile_path,'-t',tag,'.'],900)
   if build['returncode']!=0:return {'available':True,'status':'build_failed','build':build,'diagnosis':diagnose(build['stderr'])}
   if writable_paths is None:
-   try:
-    generated=self.repo.joinpath(dockerfile_path).read_text(errors='ignore')
-    writable_paths=['/app/.astro','/app/node_modules/.vite','/app/node_modules/.astro'] if re.search(r'(?i)run\\s+dev\\b',generated) else []
-   except OSError:
-    writable_paths=[]
+   writable_paths=['/app/.astro','/app/node_modules/.vite','/app/node_modules/.astro']
   run_cmd=['docker','run','-d','--rm','--network','none','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','128','--memory','1024m','--cpus','1','--read-only','--tmpfs','/tmp:rw,noexec,nosuid,size=128m,uid=10001,gid=10001']
   for path in writable_paths or []:
    if path != '/tmp':run_cmd.extend(['--tmpfs',f'{path}:rw,noexec,nosuid,size=128m,uid=10001,gid=10001'])
