@@ -1,44 +1,12 @@
-# AutoDeploy Stack Intelligence v1.0.0
+# Stack Detection & Deployment Intelligence
 
-AutoDeploy analyzes an arbitrary software repository and turns repository evidence into a deployment specification and production-oriented artifacts without requiring an OpenAI/Claude API key.
+Independent, AI-optional repository intelligence engine for AutoDeploy.
 
-## v1.0.0 pipeline
+The goal is not to ask an LLM to guess a Dockerfile. The engine first constructs an evidence-backed model of a repository, normalizes it into a Deployment IR, generates artifacts from deterministic templates, validates them in a bounded Docker runtime when Docker is available, and records why each decision was made.
 
-`repository → inventory → deterministic detection → source/AST analysis → dependency graph → migration safety → deployment IR → Docker/Compose/Kubernetes/Terraform → static validation → sandbox build/runtime test → diagnosis → bounded repair → security/SBOM plan → cloud cost estimate → deployment policy gate`
+## v1.0.0 frontend
 
-### Implemented
-
-- Git repository acquisition with shallow clone and ZIP upload support.
-- Resource-bounded repository scanner that ignores build/vendor directories and caps file size.
-- Evidence-backed detection for major language/runtime/framework/package-manager families.
-- Multi-language source-analysis adapter covering Python, JavaScript/TypeScript, Go, Rust, Java/Kotlin, C#, PHP, Ruby, Swift, Dart and Scala.
-- Cross-ecosystem dependency graph inventory with package-lock and manifest resolution where statically available.
-- Migration framework detection plus destructive/ambiguous operation detection and mandatory approval policy.
-- Versioned Deployment IR (`1.0.0`) used as the source of truth for generated artifacts.
-- Hardened Docker/Compose generation with non-root runtime and reduced privileges.
-- AWS ECS/Fargate, GCP Cloud Run and Azure Container Apps Terraform synthesis, with managed database/cache resources when detected.
-- Kubernetes Deployment/Service/HPA/PDB/NetworkPolicy/ServiceAccount synthesis.
-- Deterministic Dockerfile security validation.
-- Repository secret detection and integrated SBOM/Trivy execution plans.
-- Versioned cloud cost model with region/usage dimensions and a documented live-provider adapter boundary.
-- Bounded failure → diagnosis → repair → regeneration → rebuild loop with an attempt ledger.
-- Runtime isolation controls: no network, dropped capabilities, no-new-privileges, read-only rootfs, tmpfs, CPU/memory/PID limits.
-- Deployment policy gate preventing automatic promotion on low confidence, destructive migrations, high/critical findings or failed validation.
-- Regression tests for detection, AST, dependencies, migrations, security, generators, pricing and diagnostics.
-
-## Security boundary
-
-The local runner is a hardened Docker worker implementation for development. For an internet-facing production service, the API must submit jobs to a dedicated sandbox worker and must never expose the host Docker socket to the API. The recommended worker boundary is rootless BuildKit plus a VM/microVM isolation layer (Kata/Firecracker), controlled build egress, ephemeral storage and zero cloud credentials. Runtime egress remains disabled.
-
-## Pricing boundary
-
-The bundled catalog is deterministic planning data, not a live provider quote. Production billing should refresh regional SKU catalogs and normalize compute, storage, managed services, requests, egress, NAT, logs, backups and discounts through the provider adapter interface before presenting a commitment price.
-
-## Autonomous repair policy
-
-Auto-repair is deliberately bounded. Deterministic diagnoses may mutate only deployment IR fields with explicit repair rules. Unknown failures stop the loop instead of blindly editing application source. Every attempt records diagnosis, candidate actions and applied mutation. Production deployment still requires policy gates and approval for risky changes.
-
-## Run
+The backend serves the repository intelligence dashboard at `/`, so the normal local workflow needs only the FastAPI server.
 
 ```bash
 cd backend
@@ -46,14 +14,64 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
-The frontend is a small React/Vite dashboard and consumes `/analyze`, `/validate`, `/analyze-and-validate` and `/analyze-upload`.
+Open `http://localhost:8000`.
 
-## Test
+Paste a **public GitHub repository** and use one of the three primary actions:
+
+- **Analyse** — streams the analysis trace and then shows the complete result.
+- **Generate Dockerfile** — analyzes the repository using the same engine and returns the generated Dockerfile plus the evidence-backed Deployment IR and static validation.
+- **Generate docker-compose** — analyzes the repository and returns the generated Compose file plus the Deployment IR.
+
+The Analyse view deliberately exposes the work as it happens: repository acquisition, inventory, language detection, runtime resolution, framework candidates, package managers, build/start entrypoints, services, environment signals, infrastructure, CI/CD, dependency graph, AST/source analysis, migration safety, security checks, Docker/Compose synthesis, static validation, pricing, and completion.
+
+The live endpoint is `POST /analyze-stream` and emits newline-delimited JSON events followed by the final analysis result. This avoids a fake progress bar: the frontend renders the actual pipeline events produced by the backend.
+
+## API
+
+- `GET /` — v1 dashboard
+- `GET /health` — health check
+- `POST /analyze` — complete non-streaming analysis
+- `POST /analyze-stream` — live NDJSON analysis stream
+- `POST /generate/dockerfile` — Dockerfile generation from the analysis IR
+- `POST /generate/docker-compose` — Compose generation from the analysis IR
+- `POST /validate` — sandbox validation and bounded repair
+- `POST /analyze-and-validate` — analysis followed by validation/repair
+- `POST /analyze-upload` — ZIP repository analysis
+- `GET /docs` — OpenAPI/Swagger UI
+
+## Design principles
+
+1. **Evidence before generation.** Repository facts are collected before artifacts are synthesized.
+2. **Deployment IR is the source of truth.** Docker, Compose, Kubernetes and cloud artifacts are generated from the same normalized model.
+3. **No blind AI dependency.** The core engine is deterministic and works without OpenAI or Claude API keys.
+4. **Safety gates.** Destructive migrations, high/critical findings, low confidence and failed validation prevent automatic deployment eligibility.
+5. **Bounded repair.** Runtime failures are diagnosed and only approved deterministic mutations are attempted; unknown failures stop instead of triggering arbitrary source rewrites.
+6. **Isolation matters.** Docker runtime controls are included, but internet-scale hostile arbitrary repositories should execute in a dedicated worker with a VM/microVM boundary and no host Docker socket exposed to the API.
+7. **Pricing honesty.** The bundled pricing layer is a planning engine with a provider adapter boundary; live regional provider catalogs must be refreshed rather than pretending static numbers are live quotes.
+
+## Backend layout
+
+```text
+backend/
+  core/            scanning, detection, IR, AST/source analysis, dependencies, migrations, policy
+  generators/      Docker, Compose, Kubernetes, cloud Terraform
+  pricing/         deterministic cost model + provider boundary
+  sandbox/         build/runtime isolation policy, diagnostics, bounded repair
+  security/        secret/security checks, SBOM/vulnerability plans
+  tests/            regression tests
+  main.py          FastAPI API + streaming pipeline
+frontend/
+  index.html       dashboard shell
+  app.js           live analysis UI
+  app.css          dashboard styling
+```
+
+## Verification
+
+The backend regression suite is expected to remain green before release changes are considered complete:
 
 ```bash
 cd backend
 python -m compileall -q .
 python -m pytest -q
 ```
-
-The release regression suite is expected to pass before a v1.0.0 build is promoted.
