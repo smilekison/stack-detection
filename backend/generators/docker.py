@@ -68,7 +68,7 @@ def dockerfile(spec):
         # `cd backend && uvicorn main:app` - COPY/install still happen at /app (repo root) so
         # cross-directory references from the app (e.g. serving a sibling frontend/) keep working.
         project_dir = str(spec.build.get("project_dir") or "").strip("/")
-        run_cmd = f"cd {project_dir} && {start}" if project_dir else start
+        run_cmd = f"cd {project_dir} && {start}" if project_dir and project_dir != "." else start
         return f'''FROM python:{py}-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/app\nWORKDIR /app\nCOPY . .\nRUN {install}\n{_user()}\nRUN chown 10001:10001 /app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(run_cmd)}\n'''
     if rt == "Go":
         command = spec.build.get("container_command") or 'CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app .'; lock = "COPY go.sum ./\n" if "go.sum" in files else ""
@@ -101,7 +101,13 @@ def dockerfile(spec):
         # `COPY . .`: that copy brings back the host's original Gemfile, overwriting any
         # patch applied earlier, so patching before it would silently be undone.
         ensure_rackup = "RUN grep -q rackup Gemfile || echo \"gem 'rackup'\" >> Gemfile && bundle install\n" if strategy == "ruby-rack" else ""
-        return f'''FROM ruby:{ruby}-slim\nWORKDIR /app\nCOPY Gemfile ./\n{lock}RUN bundle install\nCOPY . .\n{ensure_rackup}{_user()}\nRUN chown 10001:10001 /app\nENV HOME=/app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
+        # Multi-stage: most real Ruby apps pull in at least one native-extension gem
+        # transitively (Rails -> rails-html-sanitizer -> nokogiri; puma -> nio4r; pg,
+        # mysql2, sqlite3...), and ruby:slim has no build toolchain at all - bundle
+        # install fails on any of them. Compiling in a build stage with build-essential,
+        # then copying only the installed gems into a slim runtime stage, fixes that
+        # without bloating the final image the way installing build tools everywhere would.
+        return f'''FROM ruby:{ruby}-slim AS build\nRUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*\nWORKDIR /app\nCOPY Gemfile ./\n{lock}RUN bundle install\nCOPY . .\n{ensure_rackup}FROM ruby:{ruby}-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nENV HOME=/app\nCOPY --from=build --chown=10001:10001 /usr/local/bundle /usr/local/bundle\nCOPY --from=build --chown=10001:10001 /app /app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
     raise ValueError(f"No verified Docker generation strategy for runtime={rt}, strategy={strategy}")
 
 
