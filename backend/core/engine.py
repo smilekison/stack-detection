@@ -30,7 +30,8 @@ class Analyzer:
   build,start,out=self.commands(primary,frameworks[0]['name'] if frameworks else 'Unknown');port=self.port();env=self.envs();infra=self.infrastructure();roles=self.roles();health=self.health()
   spec=DeploymentSpec(project={'name':r.root.name,'repository_hash':r.hash(),'source_size_bytes':r.size_bytes(),'monorepo':self.monorepo(),'roles':roles},languages=[{'name':c.name,'score':c.score,'confidence':round(min(99,c.score/70*100),1)} for c in langs],runtime={'name':runtime,'version':rv},frameworks=[{'name':x['name'],'score':x['score']} for x in frameworks],package_managers=pms,build={'command':build,'output':out},processes=[{'role':role,'start_command':start if role=='web' else 'detected externally'} for role in roles],network={'port':port,'health_endpoint':health,'smoke_paths':[health,'/health','/healthz','/'] if health else ['/','/health','/healthz']},services=services,environment=env,ci_cd=self.ci(),infrastructure=infra,security={},cloud={})
   summary={'primary_language':primary,'runtime':runtime,'runtime_version':rv,'framework':frameworks[0]['name'] if frameworks else 'Unknown','package_manager':pms[0]['name'] if pms else 'Unknown','build_command':build,'start_command':start,'build_output':out,'port':port,'health_endpoint':health,'services':[x['name'] for x in services],'environment_variables':env['names'],'application_roles':roles,'monorepo':self.monorepo(),'confidence':self.overall_confidence(langs,frameworks,pms,build,start)}
-  return spec,self.evidence,{'summary':summary,'languages':[{'name':c.name,'score':c.score} for c in langs],'frameworks':frameworks,'evidence':[e.__dict__ for e in self.evidence],'files':r.files[:5000],'deployment_ir':spec.to_dict()}
+  result={'summary':summary,'languages':[{'name':c.name,'score':c.score} for c in langs],'frameworks':frameworks,'evidence':[e.__dict__ for e in self.evidence],'files':r.files[:5000],'deployment_ir':spec.to_dict()}
+  return spec,self.evidence,result
  def runtime(self,lang):
   r=self.r;runtime={'TypeScript':'Node.js','JavaScript':'Node.js','Python':'Python','Go':'Go','Rust':'Rust','Java':'JDK','C#':'.NET','PHP':'PHP','Ruby':'Ruby','Swift':'Swift','Dart':'Dart','Elixir':'Elixir','Scala':'JVM'}.get(lang,'Unknown');rv='Not declared'
   for f in {'Node.js':['.nvmrc','.node-version'],'Python':['.python-version','runtime.txt']}.get(runtime,[]):
@@ -91,3 +92,21 @@ class Analyzer:
    if x in self.r.corpus:return x
   return None
  def overall_confidence(self,langs,fw,pms,build,start):return min(99,35+(30 if langs else 0)+(15 if fw else 0)+(10 if pms else 0)+(5 if build!='Not detected' else 0)+(5 if start!='Not detected' else 0))
+
+# Deep deployment analysis is intentionally executed as part of Analyzer.analyze,
+# before any caller can synthesize a Dockerfile from the returned Deployment IR.
+_original_analyze = Analyzer.analyze
+
+def _analyze_with_deep_pass(self):
+    spec, evidence, result = _original_analyze(self)
+    from .deep_analysis import analyze as deep_analyze
+    deep_analyze(self.r, spec, result)
+    if spec.processes:
+        result['summary']['start_command'] = spec.processes[0].get('start_command', result['summary'].get('start_command'))
+    result['summary']['port'] = spec.network.get('port', result['summary'].get('port'))
+    result['summary']['deep_analysis_status'] = result['deep_analysis']['status']
+    result['summary']['deep_analysis_confidence'] = result['deep_analysis']['confidence']
+    result['deployment_ir'] = spec.to_dict()
+    return spec, evidence, result
+
+Analyzer.analyze = _analyze_with_deep_pass
