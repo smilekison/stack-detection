@@ -50,11 +50,13 @@ def extract_zip(data):
 def analyze_root(root,providers,events=None):
  events=events if events is not None else [];emit(events,'acquisition','Repository acquired and workspace created.','done')
  repo=Repository(root);emit(events,'inventory',f'Indexed {len(repo.files):,} files ({repo.size_bytes():,} bytes of source/config data).','done',file_count=len(repo.files))
- analyzer=Analyzer(repo);emit(events,'languages','Checking source extensions and language markers…');spec,evidence,result=analyzer.analyze()
+ analyzer=Analyzer(repo);emit(events,'identification','Running deterministic stack identification from manifests, lockfiles, source markers and configuration…');spec,evidence,result=analyzer.analyze()
  emit(events,'languages',f"Detected primary language: {result['summary']['primary_language']}",'done',data=result['languages'])
  emit(events,'runtime',f"Resolved runtime: {result['summary']['runtime']} {result['summary']['runtime_version']}",'done')
  emit(events,'frameworks',f"Framework candidates: {', '.join(x['name'] for x in result['frameworks']) or 'none'}",'done',data=result['frameworks'])
  emit(events,'package_managers',f"Package managers: {', '.join(x['name'] for x in spec.package_managers) or 'none'}",'done',data=spec.package_managers)
+ deep=result.get('deep_analysis',{})
+ emit(events,'deep_analysis',f"Deep deployment analysis: {len(deep.get('checks',[]))} checks, {len(deep.get('warnings',[]))} warnings, {len(deep.get('blockers',[]))} blockers.",'done' if deep.get('status')=='ready' else 'warning',data=deep)
  emit(events,'entrypoints',f"Build: {result['summary']['build_command']} · Start: {result['summary']['start_command']} · Port: {result['summary']['port']}",'done')
  emit(events,'services',f"Detected services: {', '.join(result['summary']['services']) or 'none'}",'done',data=spec.services)
  emit(events,'environment',f"Collected {len(result['summary']['environment_variables'])} environment-variable signals.",'done')
@@ -67,11 +69,11 @@ def analyze_root(root,providers,events=None):
  emit(events,'artifacts','Synthesizing deployment artifacts from the Deployment IR…');files={'Dockerfile':dockerfile(spec),'compose.yaml':compose(spec),'.dockerignore':'.git\n.github\n.env\n.env.*\nnode_modules\n__pycache__\n*.pyc\n.venv\ncoverage\n*.log\n.gitignore'};files['k8s.yaml']=kubernetes(spec)
  for p in providers:
   if p in {'aws','gcp','azure'}:files[f'terraform-{p}.tf']=terraform(spec,p)
- emit(events,'docker','Dockerfile generated from detected runtime, framework, build and entrypoint evidence.','done');emit(events,'compose','docker-compose configuration generated from detected application roles and services.','done')
+ emit(events,'docker','Dockerfile generated from detected runtime, framework, build, adapter and entrypoint evidence.','done');emit(events,'compose','docker-compose configuration generated from detected application roles and services.','done')
  emit(events,'validation','Running deterministic Dockerfile validation…');validation=static_dockerfile(files['Dockerfile']);emit(events,'validation','Dockerfile static validation passed.' if validation['valid'] else 'Dockerfile static validation found blocking issues.','done' if validation['valid'] else 'warning',data=validation)
  emit(events,'pricing','Calculating deterministic cloud planning estimates…');pricing={p:PricingEngine().estimate(spec,p) for p in providers if p in {'aws','gcp','azure'}};emit(events,'pricing','Cloud planning estimates calculated.','done',data=pricing)
- spec.cloud={'providers':providers,'artifacts':list(files.keys())};spec.policy={'confidence':result['summary']['confidence'],'requires_manual_approval':spec.migrations.get('requires_manual_approval',False),'auto_deploy_eligible':result['summary']['confidence']>=80 and not spec.migrations.get('requires_manual_approval',False) and validation['valid'] and not any(x['severity'] in {'critical','high'} for x in spec.security['findings'])}
- result.update({'sandbox_policy':validate_policy(DEFAULT_POLICY),'deployment_ir':spec.to_dict(),'generated_files':files,'ast':ast,'dependency_graph':spec.dependencies,'migrations':spec.migrations,'security':{'findings':[x.__dict__ for x in findings],'sbom':sbom_plan(repo,result['summary']['package_manager']),'vulnerability_scan':vulnerability_plan(),'policy':security_policy(findings)},'static_validation':validation,'cloud_cost_estimates':pricing,'analysis_id':str(uuid.uuid4()),'repository':{'path_count':len(repo.files),'size_bytes':repo.size_bytes(),'hash':repo.hash()}});emit(events,'complete','Repository analysis complete.','done',data={'analysis_id':result['analysis_id'],'confidence':result['summary']['confidence']});return result,repo,spec
+ spec.cloud={'providers':providers,'artifacts':list(files.keys())};spec.policy={'confidence':min(result['summary']['confidence'],deep.get('confidence',0) or 0),'requires_manual_approval':spec.migrations.get('requires_manual_approval',False),'auto_deploy_eligible':result['summary']['confidence']>=80 and deep.get('status')=='ready' and not spec.migrations.get('requires_manual_approval',False) and validation['valid'] and not any(x['severity'] in {'critical','high'} for x in spec.security['findings'])}
+ result.update({'sandbox_policy':validate_policy(DEFAULT_POLICY),'deployment_ir':spec.to_dict(),'generated_files':files,'ast':ast,'dependency_graph':spec.dependencies,'migrations':spec.migrations,'security':{'findings':[x.__dict__ for x in findings],'sbom':sbom_plan(repo,result['summary']['package_manager']),'vulnerability_scan':vulnerability_plan(),'policy':security_policy(findings)},'static_validation':validation,'cloud_cost_estimates':pricing,'analysis_id':str(uuid.uuid4()),'repository':{'path_count':len(repo.files),'size_bytes':repo.size_bytes(),'hash':repo.hash()}});emit(events,'complete','Repository analysis complete.','done',data={'analysis_id':result['analysis_id'],'confidence':result['summary']['confidence'],'deep_analysis':deep.get('status')});return result,repo,spec
 def autonomous_validate(root,result,spec,max_attempts,run_security_tools=False,events=None):
  events=events if events is not None else [];sb=Sandbox(root);attempts=[];ledger=[];current=dockerfile(spec)
  try:
@@ -83,7 +85,7 @@ def autonomous_validate(root,result,spec,max_attempts,run_security_tools=False,e
    emit(events,'repair','Diagnosing failure and evaluating bounded deterministic repairs…');actions=repair_candidates(spec,outcome);repair=repair_apply(spec,outcome,Repository(root));ledger.append({'attempt':i+1,'result':outcome.get('status'),'diagnosis':outcome.get('diagnosis'),'candidates':actions,'repair':repair});emit(events,'repair',repair.get('message','Repair evaluation completed.'),'done' if repair.get('changed') else 'warning',data={'candidates':actions,'repair':repair})
    if not repair.get('changed'):break
    current=dockerfile(spec)
-  result['validation']={'status':'passed' if attempts and attempts[-1].get('status')=='runtime_healthy' else 'not_passed','attempts':attempts,'repair_ledger':ledger,'max_attempts':max_attempts,'autonomous_repair':bool(any(x.get('repair',{}).get('changed') for x in ledger))};result['deployment_gate']=deployment_gate(spec,result.get('static_validation',{}),result.get('security',{}).get('findings',[]),result['validation'])
+  result['validation']={'status':'passed' if attempts and attempts[-1].get('status')=='runtime_healthy' else ('skipped' if attempts and attempts[-1].get('status')=='skipped' else 'not_passed'),'attempts':attempts,'repair_ledger':ledger,'max_attempts':max_attempts,'autonomous_repair':bool(any(x.get('repair',{}).get('changed') for x in ledger))};result['deployment_gate']=deployment_gate(spec,result.get('static_validation',{}),result.get('security',{}).get('findings',[]),result['validation'])
  finally:sb.cleanup()
  return result
 @app.get('/')
@@ -127,13 +129,26 @@ def analyze_stream(req:AnalyzeRequest):
 def generate_dockerfile(req:AnalyzeRequest):
  tmp,root=clone(req.repo_url)
  try:
-  d,_,_=analyze_root(root,req.providers);return {'analysis_id':d['analysis_id'],'summary':d['summary'],'stacks':{'languages':d['languages'],'frameworks':d['frameworks'],'services':d['summary']['services']},'dockerfile':d['generated_files']['Dockerfile'],'deployment_ir':d['deployment_ir'],'static_validation':d['static_validation']}
+  d,_,spec=analyze_root(root,req.providers)
+  deep=d.get('deep_analysis',{})
+  if deep.get('status')!='ready':
+   raise HTTPException(422,detail={'message':'Dockerfile generation blocked: deep repository analysis did not reach a deterministic ready state.','deep_analysis':deep})
+  if not d.get('static_validation',{}).get('valid',False):
+   raise HTTPException(422,detail={'message':'Dockerfile generation blocked by static validation.','static_validation':d.get('static_validation',{})})
+  verification=autonomous_validate(root,d,spec,req.max_repair_attempts,req.run_security_tools)
+  if verification.get('validation',{}).get('status')!='passed':
+   reason='Docker runtime verification is unavailable; Dockerfile withheld.' if verification.get('validation',{}).get('status')=='skipped' else 'Generated Dockerfile did not pass build/runtime verification after bounded repair attempts; Dockerfile withheld.'
+   raise HTTPException(503 if verification.get('validation',{}).get('status')=='skipped' else 422,detail={'message':reason,'analysis_id':d['analysis_id'],'deep_analysis':deep,'validation':verification.get('validation',{}),'deployment_gate':verification.get('deployment_gate',{})})
+  final_path=Path(root)/'Dockerfile'
+  final=final_path.read_text() if final_path.exists() else dockerfile(spec)
+  d['generated_files']['Dockerfile']=final
+  return {'analysis_id':d['analysis_id'],'summary':d['summary'],'deep_analysis':deep,'stacks':{'languages':d['languages'],'frameworks':d['frameworks'],'services':d['summary']['services']},'dockerfile':final,'deployment_ir':d['deployment_ir'],'static_validation':static_dockerfile(final),'verification':verification.get('validation',{}),'deployment_gate':verification.get('deployment_gate',{})}
  finally:shutil.rmtree(tmp,ignore_errors=True)
 @app.post('/generate/docker-compose')
 def generate_compose(req:AnalyzeRequest):
  tmp,root=clone(req.repo_url)
  try:
-  d,_,_=analyze_root(root,req.providers);return {'analysis_id':d['analysis_id'],'summary':d['summary'],'stacks':{'languages':d['languages'],'frameworks':d['frameworks'],'services':d['summary']['services']},'compose':d['generated_files']['compose.yaml'],'deployment_ir':d['deployment_ir']}
+  d,_,_=analyze_root(root,req.providers);return {'analysis_id':d['analysis_id'],'summary':d['summary'],'deep_analysis':d.get('deep_analysis',{}),'stacks':{'languages':d['languages'],'frameworks':d['frameworks'],'services':d['summary']['services']},'compose':d['generated_files']['compose.yaml'],'deployment_ir':d['deployment_ir']}
  finally:shutil.rmtree(tmp,ignore_errors=True)
 @app.post('/analyze-upload')
 async def analyze_upload(file:UploadFile=File(...),validate:bool=False,max_repair_attempts:int=3):
