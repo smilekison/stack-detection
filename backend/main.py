@@ -35,6 +35,7 @@ class AnalyzeRequest(BaseModel):
     providers: list[str] = Field(default_factory=lambda: ['aws', 'gcp', 'azure'])
     run_security_tools: bool = False
     analysis_id: str | None = None
+    target: str | None = None
 
 class ValidateRequest(AnalyzeRequest):
     run_validation: bool = True
@@ -83,7 +84,7 @@ def _cache_get(analysis_id, repo_url):
     if not item or item.get('repo_url') != str(repo_url) or time.time() - item.get('created_at', 0) > ANALYSIS_CACHE_TTL: return None
     return item
 
-def analyze_root(root, providers, events=None, repo_url=None):
+def analyze_root(root, providers, events=None, repo_url=None, target=None):
     """Analysis phase only. No deployment artifact is generated here."""
     events = events if events is not None else []
     emit(events, 'acquisition', 'Repository acquired and isolated for analysis.', 'done')
@@ -91,7 +92,7 @@ def analyze_root(root, providers, events=None, repo_url=None):
     emit(events, 'inventory', f'Indexed {len(repo.files):,} files ({repo.size_bytes():,} bytes of source/config data).', 'done', file_count=len(repo.files))
     analyzer = Analyzer(repo)
     emit(events, 'identification', 'Running deterministic stack identification from manifests, lockfiles, source markers and configuration…')
-    spec, evidence, result = analyzer.analyze()
+    spec, evidence, result = analyzer.analyze(target=target)
     emit(events, 'identification', f"Primary language: {result['summary']['primary_language']}; framework: {result['summary']['framework']}.", 'done', data={'languages': result['languages'], 'frameworks': result['frameworks']})
     emit(events, 'runtime', f"Runtime: {result['summary']['runtime']} {result['summary']['runtime_version']}", 'done')
     emit(events, 'package_managers', f"Package managers: {', '.join(x['name'] for x in spec.package_managers) or 'none'}", 'done', data=spec.package_managers)
@@ -135,7 +136,7 @@ def _reuse_or_analyze(root, req, providers, events=None):
             if events is not None: emit(events, 'analysis_reuse', 'Reusing the completed repository analysis; repository hash matches.', 'done')
             return result, repo, spec
     if events is not None: emit(events, 'analysis_reuse', 'No matching analysis cache was supplied; running the full analysis gate first.', 'done')
-    return analyze_root(root, providers, events, req.repo_url)
+    return analyze_root(root, providers, events, req.repo_url, target=req.target)
 
 def _requested_artifact(spec, artifact):
     artifact = artifact.lower().strip()
@@ -213,7 +214,7 @@ def health(): return {'status': 'ok', 'version': app.version, 'engine': 'determi
 @app.post('/analyze')
 def analyze(req: AnalyzeRequest):
     tmp, root = clone(req.repo_url)
-    try: d, _, _ = analyze_root(root, req.providers, repo_url=req.repo_url); return d
+    try: d, _, _ = analyze_root(root, req.providers, repo_url=req.repo_url, target=req.target); return d
     finally: shutil.rmtree(tmp, ignore_errors=True)
 
 @app.post('/analyze-stream')
@@ -226,7 +227,7 @@ def analyze_stream(req: AnalyzeRequest):
             try:
                 q.put({'phase': 'acquisition', 'message': 'Cloning repository for detailed analysis…', 'status': 'running', 'id': str(uuid.uuid4()), 'time': time.time()})
                 tmp, root = clone(req.repo_url)
-                try: result, _, _ = analyze_root(root, req.providers, LiveEvents(), req.repo_url); q.put({'__result__': result})
+                try: result, _, _ = analyze_root(root, req.providers, LiveEvents(), req.repo_url, target=req.target); q.put({'__result__': result})
                 finally: shutil.rmtree(tmp, ignore_errors=True)
             except Exception as exc: q.put({'__error__': str(exc)})
             finally: q.put(done)
@@ -282,12 +283,12 @@ async def analyze_upload(file: UploadFile = File(...), validate: bool = False, m
 def validate(req: ValidateRequest):
     tmp, root = clone(req.repo_url)
     try:
-        d, _, spec = analyze_root(root, req.providers, repo_url=req.repo_url); return autonomous_validate(root, d, spec, req.max_repair_attempts, req.run_security_tools)
+        d, _, spec = analyze_root(root, req.providers, repo_url=req.repo_url, target=req.target); return autonomous_validate(root, d, spec, req.max_repair_attempts, req.run_security_tools)
     finally: shutil.rmtree(tmp, ignore_errors=True)
 
 @app.post('/analyze-and-validate')
 def analyze_validate(req: AnalyzeRequest):
     tmp, root = clone(req.repo_url)
     try:
-        d, _, spec = analyze_root(root, req.providers, repo_url=req.repo_url); return autonomous_validate(root, d, spec, req.max_repair_attempts, req.run_security_tools)
+        d, _, spec = analyze_root(root, req.providers, repo_url=req.repo_url, target=req.target); return autonomous_validate(root, d, spec, req.max_repair_attempts, req.run_security_tools)
     finally: shutil.rmtree(tmp, ignore_errors=True)

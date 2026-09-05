@@ -10,6 +10,7 @@ import json
 import re
 from .repository_scope import select_unit, discover_units, files_for_unit, read_unit_json, text as scoped_text
 from .technology_catalog import SOURCE_EXTENSIONS, NODE_FRAMEWORKS, PY_FRAMEWORKS, GO_FRAMEWORKS, RUST_FRAMEWORKS, JVM_FRAMEWORKS, DOTNET_FRAMEWORKS, PHP_FRAMEWORKS, RUBY_FRAMEWORKS, ELIXIR_FRAMEWORKS, STATIC_MARKERS, ecosystem_for_manifest
+from . import readme_evidence
 
 LANGUAGE_NAMES = {
     "javascript":"JavaScript", "typescript":"TypeScript", "python":"Python", "go":"Go", "rust":"Rust", "java":"Java",
@@ -38,10 +39,34 @@ def _port(content, default):
 
 def _module(path): return Path(path).with_suffix("").as_posix().replace("/", ".")
 
-def _framework_from_text(mapping, content):
-    low = content.lower()
-    for needle, name in mapping.items():
-        if needle.lower() in low: return name
+
+def _reconcile_command(manifest_command, readme_command):
+    """Reconcile a manifest/source-resolved command against a README-documented one.
+
+    Evidence reconciliation (PROGRAM.md Priority 2), scoped to the single fact this
+    engine currently resolves twice: the production start command. Agreement, or a
+    README command confirming/extending the same tool, keeps the resolved command;
+    a README command naming a genuinely different tool with no manifest command is
+    accepted as the fallback; two different tools both claimed as authoritative is a
+    contradiction that must block rather than silently pick one.
+    """
+    if not manifest_command: return readme_command, False
+    if not readme_command: return manifest_command, False
+    a, b = manifest_command.strip(), readme_command.strip()
+    if a == b or a.split(" ", 1)[0] == b.split(" ", 1)[0]: return a, False
+    return a, True
+
+def _framework_from_text(mapping, manifest_text, source_text=""):
+    """Manifest/dependency evidence is checked before falling back to source text.
+
+    Source text alone is Tier 5 (generic textual mentions) and must not outrank a
+    real dependency declaration - a detector-like file that merely lists framework
+    names as data (e.g. a technology catalog) must never win over the manifest.
+    """
+    for text in (manifest_text, source_text):
+        low = (text or "").lower()
+        for needle, name in mapping.items():
+            if needle.lower() in low: return name
     return None
 
 def _node(repo, unit):
@@ -64,7 +89,7 @@ def _node(repo, unit):
 def _python(repo, unit):
     files = _files(repo, unit); manifests = [f for f in files if Path(f).name in {"requirements.txt", "requirements-dev.txt", "pyproject.toml", "Pipfile"}]
     content = "\n".join(_read(repo, f) for f in manifests).lower(); source = scoped_text(repo, unit, suffixes={".py"})
-    framework = _framework_from_text(PY_FRAMEWORKS, content + "\n" + source)
+    framework = _framework_from_text(PY_FRAMEWORKS, content, source)
     return manifests, framework
 
 
@@ -82,30 +107,30 @@ def _go(repo, unit):
 def _rust(repo, unit):
     cargo=_read(repo,unit.get("manifest")); bins=re.findall(r"(?ms)^\s*\[\[bin\]\]\s*.*?^\s*name\s*=\s*[\"']([^\"']+)",cargo)
     nm=re.search(r"(?m)^\s*name\s*=\s*[\"']([^\"']+)",cargo); binary=bins[0] if bins else (nm.group(1) if nm else "app")
-    source=scoped_text(repo,unit,suffixes={".rs"}); framework=_framework_from_text(RUST_FRAMEWORKS,cargo+"\n"+source)
+    source=scoped_text(repo,unit,suffixes={".rs"}); framework=_framework_from_text(RUST_FRAMEWORKS,cargo,source)
     return binary,framework
 
 
 def _jvm(repo,unit):
     manifest=unit.get("manifest"); t=_read(repo,manifest).lower(); name=Path(manifest).name if manifest else ""
-    framework=_framework_from_text(JVM_FRAMEWORKS,t+"\n"+scoped_text(repo,unit,suffixes={".java",".kt",".scala"}))
+    framework=_framework_from_text(JVM_FRAMEWORKS,t,scoped_text(repo,unit,suffixes={".java",".kt",".scala"}))
     return ("gradle" if name.startswith(("build.gradle","settings.gradle")) else "maven"), framework
 
 
 def _dotnet(repo,unit):
     files=_files(repo,unit); project=next((f for f in files if f.lower().endswith((".csproj",".fsproj",".vbproj"))),None)
-    t=_read(repo,project); tfm=re.search(r"<TargetFramework[^>]*>([^<]+)",t,re.I); framework=_framework_from_text(DOTNET_FRAMEWORKS,t+"\n"+scoped_text(repo,unit,suffixes={".cs"}))
+    t=_read(repo,project); tfm=re.search(r"<TargetFramework[^>]*>([^<]+)",t,re.I); framework=_framework_from_text(DOTNET_FRAMEWORKS,t,scoped_text(repo,unit,suffixes={".cs"}))
     return project, (tfm.group(1) if tfm else "net8.0"), (Path(project).stem if project else "app"), framework
 
 
 def _php(repo,unit):
-    files=_files(repo,unit); composer=next((f for f in files if Path(f).name=="composer.json"),unit.get("manifest")); content=_read(repo,composer); framework=_framework_from_text(PHP_FRAMEWORKS,content+"\n"+scoped_text(repo,unit,suffixes={".php"}))
+    files=_files(repo,unit); composer=next((f for f in files if Path(f).name=="composer.json"),unit.get("manifest")); content=_read(repo,composer); framework=_framework_from_text(PHP_FRAMEWORKS,content,scoped_text(repo,unit,suffixes={".php"}))
     public=any(Path(f).name=="index.php" and "public" in Path(f).parts for f in files); index=any(Path(f).name=="index.php" for f in files)
     return composer, framework, (public or index), public
 
 
 def _ruby(repo,unit):
-    files=set(_files(repo,unit)); source=scoped_text(repo,unit,suffixes={".rb"}); framework=_framework_from_text(RUBY_FRAMEWORKS,source+"\n"+" ".join(files)); return framework, ("bin/rails" in files or "config/application.rb" in files), ("config.ru" in files)
+    files=set(_files(repo,unit)); source=scoped_text(repo,unit,suffixes={".rb"}); framework=_framework_from_text(RUBY_FRAMEWORKS,"",source+"\n"+" ".join(files)); return framework, ("bin/rails" in files or "config/application.rb" in files), ("config.ru" in files)
 
 
 def _source_profile(repo, unit):
@@ -128,8 +153,8 @@ def _health(repo,unit):
     return next((x for x in ("/health","/healthz","/ready","/readiness","/live") if x in t),None)
 
 
-def analyze(repo,spec,result):
-    selected,units,selection_error=select_unit(repo)
+def analyze(repo,spec,result,target=None):
+    selected,units,selection_error=select_unit(repo,preferred_root=target)
     checks=[]; warnings=[]; blockers=[]; decisions=[]
     def check(code,title,status,evidence=None,detail=""):
         x={"code":code,"title":title,"status":status,"evidence":evidence or [],"detail":detail};checks.append(x)
@@ -142,7 +167,8 @@ def analyze(repo,spec,result):
         return result["deep_analysis"]
 
     root=selected.get("root") or "."; files=_files(repo,selected); eco=selected.get("ecosystem"); profile=_source_profile(repo,selected)
-    spec.project.update({"application_units":units,"selected_application":selected,"application_root":root,"technology_profile":profile})
+    readme=readme_evidence.parse(repo,selected)
+    spec.project.update({"application_units":units,"selected_application":selected,"application_root":root,"technology_profile":profile,"files":files})
     check("APPLICATION_BOUNDARY","Application boundary","pass",selected.get("manifests",[]) or files[:5],f"Deployment target: {selected.get('id') or '.'}.")
 
     framework=None; strategy=None; port=None; start=""; manifest=None; script_inventory={}; language=LANGUAGE_NAMES.get(eco,eco or "Unknown")
@@ -185,7 +211,14 @@ def analyze(repo,spec,result):
         elif framework in {"Vite","React","Vue","Svelte","Angular","Gatsby","Docusaurus","Eleventy","SolidJS","Preact"} and scripts.get("build") and not scripts.get("start"):
             port=8080; output="build" if framework=="React" and "react-scripts" in deps else "dist"; strategy="static-node"; start='nginx -g "daemon off;"'; spec.build.update({"runtime_strategy":strategy,"output":output})
         elif scripts.get("start"):
-            port=_port(_unit_text(repo,selected),3000); strategy="node-script"; start=scripts["start"]; spec.build["runtime_strategy"]=strategy
+            port=_port(_unit_text(repo,selected),readme["port"] or 3000); strategy="node-script"; start=scripts["start"]; spec.build["runtime_strategy"]=strategy
+            readme_start=next((c["command"] for c in readme["commands"]["start"]["production"]),None)
+            if readme_start:
+                start,contradiction=_reconcile_command(start,readme_start)
+                if contradiction: check("EVIDENCE_RECONCILIATION","Production command reconciliation","blocker",[manifest],f"README documents a different production command ('{readme_start}') than package.json's start script ('{scripts['start']}'); refusing to guess.")
+        elif readme["commands"]["start"]["production"]:
+            readme_cmd=readme["commands"]["start"]["production"][0]; start=readme_cmd["command"]; port=_port(_unit_text(repo,selected),readme["port"] or 3000); strategy="readme-documented"; spec.build["runtime_strategy"]=strategy
+            check("RUNTIME","Production runtime (README)","pass",[readme_cmd["source"]],f"No package.json start script was provable; using README-documented production command: {start}")
         elif scripts.get("dev"):
             check("RUNTIME","Production runtime","blocker",[manifest],"Only a development script exists; refusing to turn it into a production runtime except for a verified framework fallback.")
         else: check("RUNTIME","Production runtime","blocker",[manifest],"No deterministic Node runtime command.")
@@ -193,7 +226,7 @@ def analyze(repo,spec,result):
     elif not blockers and eco=="python":
         manifests,framework=_python(repo,selected); manifest=manifests[0] if manifests else None; language="Python"; spec.runtime={"name":"Python","version":"3.12"}; spec.build.update({"dependency_manifest":manifest,"project_dir":root})
         check("MANIFEST","Python dependency manifest","pass" if manifest else "blocker",manifests[:10])
-        port=_port(_unit_text(repo,selected),8000); py=[f for f in files if f.endswith(".py")]; entry=None
+        port=_port(_unit_text(repo,selected),readme["port"] or 8000); py=[f for f in files if f.endswith(".py")]; entry=None
         if framework=="Django":
             entry=next((f for f in py if Path(f).name=="wsgi.py"),None); start=f"gunicorn {_module(entry)}:application --bind 0.0.0.0:{port}" if entry else ""
             strategy="python-gunicorn"
@@ -202,36 +235,49 @@ def analyze(repo,spec,result):
         elif framework=="Flask":
             entry=next((f for f in py if Path(f).name in {"main.py","app.py","application.py"} and re.search(r"\bapp\s*=",_read(repo,f))),None); start=f"gunicorn {_module(entry)}:app --bind 0.0.0.0:{port}" if entry else ""; strategy="python-gunicorn"
         else: start=""; strategy=None
+        readme_start=next((c["command"] for c in readme["commands"]["start"]["production"]),None)
+        if entry and readme_start:
+            start,contradiction=_reconcile_command(start,readme_start)
+            if contradiction: check("EVIDENCE_RECONCILIATION","Production command reconciliation","blocker",[entry],f"README documents a different production command ('{readme_start}') than the resolved entrypoint command ('{start}'); refusing to guess.")
         if entry: spec.build.update({"runtime_strategy":strategy,"entrypoint":entry}); spec.processes[0]["start_command"]=start; check("ENTRYPOINT","Python web entrypoint","pass",[entry],start)
+        elif readme_start:
+            readme_cmd=readme["commands"]["start"]["production"][0]; start=readme_start; strategy=strategy or "readme-documented"
+            spec.build.update({"runtime_strategy":strategy}); check("ENTRYPOINT","Python web entrypoint (README)","pass",[readme_cmd["source"]],f"No conventional entrypoint file was provable; using README-documented production command: {start}")
         else: check("ENTRYPOINT","Python web entrypoint","blocker",py[:10],f"No deterministic web entrypoint for framework={framework or 'Unknown'}.")
 
     elif not blockers and eco=="go":
-        target,framework=_go(repo,selected); language="Go"; gm=_read(repo,selected.get("manifest")); m=re.search(r"(?m)^go\s+([0-9.]+)",gm); spec.runtime={"name":"Go","version":m.group(1) if m else "1.24"}; port=_port(_unit_text(repo,selected),8080)
+        target,framework=_go(repo,selected); language="Go"; gm=_read(repo,selected.get("manifest")); m=re.search(r"(?m)^go\s+([0-9.]+)",gm); spec.runtime={"name":"Go","version":m.group(1) if m else "1.24"}; port=_port(_unit_text(repo,selected),readme["port"] or 8080)
         if target: strategy="go-binary"; start="/app"; spec.build.update({"runtime_strategy":strategy,"source_package":target,"container_command":f'CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app {target}'})
         else: check("ENTRYPOINT","Go main package","blocker",[],"No package main + func main entrypoint.")
 
     elif not blockers and eco=="rust":
-        binary,framework=_rust(repo,selected); language="Rust"; spec.runtime={"name":"Rust","version":"1.88"}; port=_port(_unit_text(repo,selected),8080); strategy="rust-binary"; start=f"/app/{binary}"; spec.build.update({"runtime_strategy":strategy,"binary":binary,"container_command":"cargo build --release"})
+        binary,framework=_rust(repo,selected); language="Rust"; spec.runtime={"name":"Rust","version":"1.88"}; port=_port(_unit_text(repo,selected),readme["port"] or 8080); strategy="rust-binary"; start=f"/app/{binary}"; spec.build.update({"runtime_strategy":strategy,"binary":binary,"container_command":"cargo build --release"})
 
     elif not blockers and eco in {"jvm","scala"}:
-        manager,framework=_jvm(repo,selected); language="JVM"; spec.runtime={"name":"JDK","version":"21"}; port=_port(_unit_text(repo,selected),8080)
+        manager,framework=_jvm(repo,selected); language="JVM"; spec.runtime={"name":"JDK","version":"21"}; port=_port(_unit_text(repo,selected),readme["port"] or 8080)
         if framework in {"Spring Boot","Quarkus","Micronaut","Ktor","Play Framework"}: strategy="jvm-jar"; start="java -jar /app/app.jar"; spec.build.update({"runtime_strategy":strategy,"jvm_manager":manager})
         else: check("ENTRYPOINT","JVM web runtime","blocker",selected.get("manifests",[]),"No deterministic supported JVM web framework/runtime identified.")
 
     elif not blockers and eco in {"dotnet","fsharp","vbnet"}:
-        project,tfm,assembly,framework=_dotnet(repo,selected); language=LANGUAGE_NAMES.get(eco,eco); spec.runtime={"name":".NET","version":tfm}; port=_port(_unit_text(repo,selected),8080)
+        project,tfm,assembly,framework=_dotnet(repo,selected); language=LANGUAGE_NAMES.get(eco,eco); spec.runtime={"name":".NET","version":tfm}; port=_port(_unit_text(repo,selected),readme["port"] or 8080)
         if project and (framework or eco=="dotnet"): strategy="dotnet-aspnet"; start=f"dotnet /app/{assembly}.dll"; spec.build.update({"runtime_strategy":strategy,"project_file":project,"assembly":assembly})
         else: check("ENTRYPOINT",".NET web runtime","blocker",[project] if project else [],"No deterministic ASP.NET web project identified.")
 
     elif not blockers and eco=="php":
+        # PHP's Apache runtime always listens on 80 inside the container regardless of what a
+        # README documents for local `php -S` development - README port evidence does not apply here.
         composer,framework,web,public=_php(repo,selected); language="PHP"; port=80
         if web: strategy="php-apache"; start="apache2-foreground"; spec.runtime={"name":"PHP","version":"8.3"}; spec.build.update({"runtime_strategy":strategy,"document_root":"public" if public else ".","dependency_manifest":composer})
         else: check("ENTRYPOINT","PHP web entrypoint","blocker",[composer] if composer else [],"No deterministic PHP web entrypoint.")
 
     elif not blockers and eco=="ruby":
-        framework,rails,rack=_ruby(repo,selected); language="Ruby"; port=_port(_unit_text(repo,selected),3000)
+        framework,rails,rack=_ruby(repo,selected); language="Ruby"; port=_port(_unit_text(repo,selected),readme["port"] or 3000)
+        readme_start=next((c["command"] for c in readme["commands"]["start"]["production"]),None)
         if rails: strategy="ruby-rails"; start=f"bundle exec rails server -b 0.0.0.0 -p {port}"
         elif rack: strategy="ruby-rack"; start=f"bundle exec rackup -o 0.0.0.0 -p {port}"
+        elif readme_start:
+            readme_cmd=readme["commands"]["start"]["production"][0]; start=readme_start; strategy="readme-documented"
+            check("ENTRYPOINT","Ruby web entrypoint (README)","pass",[readme_cmd["source"]],f"No Rails or Rack marker was provable; using README-documented production command: {start}")
         else: check("ENTRYPOINT","Ruby web entrypoint","blocker",[],"No Rails or Rack web entrypoint identified.")
         if strategy: spec.runtime={"name":"Ruby","version":"3.3"}; spec.build["runtime_strategy"]=strategy
 
@@ -246,6 +292,7 @@ def analyze(repo,spec,result):
         spec.processes[0]["start_command"]=start; spec.network["port"]=port; spec.network["health_endpoint"]=_health(repo,selected); spec.services=_services(repo,selected)
         spec.frameworks=[{"name":framework,"score":95,"evidence":"scoped application manifest/source"}] if framework else []
         spec.languages=[{"name":language,"score":95,"confidence":95.0}]
+        if readme.get("working_directory") in (root, Path(root).name) and readme["working_directory"]: spec.build["working_directory"]=readme["working_directory"]
         spec.project["container_decisions"]=[{"strategy":strategy,"application_root":root,"manifest":manifest or selected.get("manifest")}]
         decisions.extend(spec.project["container_decisions"])
         check("RUNTIME","Production runtime","pass",[manifest] if manifest else [],f"Resolved strategy={strategy}, start={start}, port={port}.")

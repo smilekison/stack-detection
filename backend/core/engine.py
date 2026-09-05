@@ -97,10 +97,10 @@ class Analyzer:
 # before any caller can synthesize a Dockerfile from the returned Deployment IR.
 _original_analyze = Analyzer.analyze
 
-def _analyze_with_deep_pass(self):
+def _analyze_with_deep_pass(self, target=None):
     spec, evidence, result = _original_analyze(self)
     from .deep_analysis import analyze as deep_analyze
-    deep_analyze(self.r, spec, result)
+    deep_analyze(self.r, spec, result, target=target)
     if spec.processes:
         result['summary']['start_command'] = spec.processes[0].get('start_command', result['summary'].get('start_command'))
     result['summary']['port'] = spec.network.get('port', result['summary'].get('port'))

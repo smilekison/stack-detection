@@ -76,6 +76,29 @@ def _score(repo,unit):
     return s
 
 
+SERVING_VERBS=("serve","serves","served","serving","mount","mounted","static","embed","embedded")
+
+
+def _readme_serving_evidence(repo,dependency):
+    """A second, equally-valid proof path: the root README documents the relationship.
+
+    Source markers are Tier 3 evidence; README is Tier 2 and PROGRAM.md requires it be
+    treated as first-class. Either proof is sufficient - this is the general "README +
+    source prove A serves B" rule, not a special case for one repository.
+    """
+    root=dependency.get("root") or ""
+    if not root: return []
+    name=Path(root).name
+    for f in repo.files:
+        parent=Path(f).parent.as_posix()
+        if parent not in (".",""): continue
+        if Path(f).name.lower() not in NON_RUNTIME_NAMES: continue
+        for line in repo.read(f).lower().splitlines():
+            if (root.lower() in line or name.lower() in line) and any(v in line for v in SERVING_VERBS):
+                return [f"{f}: README documents {name} being served by the host application"]
+    return []
+
+
 def _integration_evidence(repo,host,dependency):
     """Return concrete evidence that a host application serves another unit.
 
@@ -90,13 +113,13 @@ def _integration_evidence(repo,host,dependency):
         ".py",".js",".jsx",".ts",".tsx",".go",".rs",".java",".kt",".scala",
         ".cs",".fs",".vb",".php",".rb",".ex",".exs"
     })
-    if not source: return []
-    normalized=source.replace("\\","/")
-    root_token=root.replace("\\","/")
-    if root_token not in normalized and Path(root_token).name not in normalized: return []
-    marker_hits=[m for m in SERVING_MARKERS if m.lower() in normalized.lower()]
-    if not marker_hits: return []
-    return [f"{root_token}: referenced by host application"]+marker_hits[:3]
+    if source:
+        normalized=source.replace("\\","/")
+        root_token=root.replace("\\","/")
+        if root_token in normalized or Path(root_token).name in normalized:
+            marker_hits=[m for m in SERVING_MARKERS if m.lower() in normalized.lower()]
+            if marker_hits: return [f"{root_token}: referenced by host application"]+marker_hits[:3]
+    return _readme_serving_evidence(repo,dependency)
 
 
 def _integrated_dependencies(repo,host,units):

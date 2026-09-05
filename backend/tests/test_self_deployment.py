@@ -10,7 +10,10 @@ def test_stack_detection_can_analyze_and_generate_for_its_own_layout(tmp_path):
     backend.mkdir()
     (backend / "requirements.txt").write_text("fastapi==0.116.1\nuvicorn[standard]==0.35.0\n")
     (backend / "main.py").write_text(
-        "from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get('/health')\ndef health(): return {'status': 'ok'}\n"
+        "from fastapi import FastAPI\nfrom fastapi.responses import FileResponse\n\n"
+        "FRONTEND = 'frontend'\napp = FastAPI()\n\n"
+        "@app.get('/health')\ndef health(): return {'status': 'ok'}\n\n"
+        "@app.get('/')\ndef home(): return FileResponse(FRONTEND + '/index.html')\n"
     )
     (tmp_path / "frontend" / "index.html").parent.mkdir()
     (tmp_path / "frontend" / "index.html").write_text("<html></html>")
