@@ -1,85 +1,169 @@
 # Stack Detection & Deployment Intelligence
 
-Independent, AI-optional repository intelligence engine for AutoDeploy.
+An **independent repository-intelligence project**. It is not the AutoDeploy product itself.
 
-The goal is not to ask an LLM to guess a Dockerfile. The engine first constructs an evidence-backed model of a repository, normalizes it into a Deployment IR, performs a second deployment-focused analysis of manifests, lockfiles, scripts, framework configuration, adapters, output modes, ports and repository layout, then generates artifacts from deterministic templates. Dockerfile generation is gated by that deep analysis and, for the explicit Dockerfile generation endpoint, by a real Docker build/runtime smoke test with bounded deterministic repair when a Docker worker is available.
+The engine's job is to understand a repository before it creates deployment artifacts. It does not blindly guess a Dockerfile from a framework name. It first builds an evidence-backed model of the repository, normalizes it into a Deployment IR, performs a deployment-focused analysis, and only then generates the specific artifact requested by the user.
 
-## v1.0.0 frontend
+## Analysis-first architecture
 
-The backend serves the repository intelligence dashboard at `/`, so the normal local workflow needs only the FastAPI server.
+```text
+Repository
+   ↓
+Acquire / isolate
+   ↓
+Full file inventory
+   ↓
+Language + framework detection
+   ↓
+Runtime + package manager + lockfile resolution
+   ↓
+Build / start / entrypoint analysis
+   ↓
+Application roles + services + ports + environment
+   ↓
+Infrastructure + CI/CD discovery
+   ↓
+Dependency graph + source/AST analysis
+   ↓
+Migration + security analysis
+   ↓
+Deep deployment analysis / blockers / decisions
+   ↓
+Deployment IR
+   ↓
+        ┌─────────────────────────────────────────┐
+        │ ONLY NOW generate the requested artifact │
+        └─────────────────────────────────────────┘
+             ↓          ↓          ↓
+         Dockerfile   Compose   K8s/Terraform
+```
+
+**Analysis never generates deployment artifacts.** The analysis response contains `generated_files: {}` and `generation.status: "not_requested"`.
+
+Generation endpoints can reuse the immediately preceding analysis through its `analysis_id`. Before reuse, the server clones the repository again and compares its repository hash. If the repository changed or the analysis is unavailable/expired, the complete analysis runs again before generation.
+
+## Local usage
 
 ```bash
 cd backend
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
-
 ```
 
 Open `http://localhost:8000`.
 
-Paste a **public GitHub repository** and use one of the three primary actions:
+Paste a public GitHub repository.
 
-- **Analyse** — streams the full analysis trace and then shows the complete result.
-- **Generate Dockerfile** — performs the same identification plus the deep deployment pass, statically validates the candidate, builds and runs it in the sandbox, applies only bounded deterministic repairs when needed, and returns the Dockerfile only after runtime verification succeeds. If Docker is unavailable or verification fails, the artifact is withheld instead of being presented as verified.
-- **Generate docker-compose** — analyzes the repository and returns the generated Compose file plus the Deployment IR.
+### Analyse
 
-The analysis pipeline deliberately exposes the work in order: repository acquisition, inventory, deterministic stack identification, runtime resolution, framework candidates, package managers, **deep deployment analysis**, build/start entrypoints, services, environment signals, infrastructure, CI/CD, dependency graph, AST/source analysis, migration safety, security checks, artifact synthesis, static validation, pricing, and completion.
+**Analyse** performs the complete repository intelligence pass and streams the stages to the dashboard. It does not create a Dockerfile, Compose file, Kubernetes manifest, or Terraform file.
 
-The live endpoint is `POST /analyze-stream` and emits newline-delimited JSON events followed by the final analysis result. The frontend renders actual backend events rather than a fake timed progress bar.
+### Generate Dockerfile
+
+**Generate Dockerfile** first ensures that a complete analysis exists. It then sends the `analysis_id` to the generation endpoint. The server verifies that the repository hash is unchanged, applies the deep-analysis gate, generates only the Dockerfile, and statically validates it before returning it.
+
+Optional runtime verification can be requested with `run_validation: true`. If runtime verification is enabled, the sandbox can build, start, smoke-test, diagnose and apply bounded deterministic repairs before the Dockerfile is released.
+
+### Generate docker-compose
+
+**Generate docker-compose** follows the same analysis gate and returns only `compose.yaml` plus the analysis/deployment metadata. It does not silently generate Dockerfile, Kubernetes or Terraform artifacts.
+
+### Other artifacts
+
+The backend also exposes the same gated generation mechanism for:
+
+- `k8s`
+- `terraform-aws`
+- `terraform-gcp`
+- `terraform-azure`
+
+The generic endpoint is `POST /generate/{artifact}`.
 
 ## API
 
-- `GET /` — v1 dashboard
-- `GET /health` — health check
-- `POST /analyze` — complete non-streaming analysis
-- `POST /analyze-stream` — live NDJSON analysis stream
-- `POST /generate/dockerfile` — deep analysis + static validation + sandbox build/runtime verification + bounded repair, then Dockerfile release
-- `POST /generate/docker-compose` — Compose generation from the analysis IR
-- `POST /validate` — sandbox validation and bounded repair
-- `POST /analyze-and-validate` — analysis followed by validation/repair
+- `GET /` — dashboard
+- `GET /health` — service health
+- `POST /analyze` — complete analysis, no generated artifacts
+- `POST /analyze-stream` — live NDJSON analysis stream, no generated artifacts
+- `POST /generate/dockerfile` — analysis gate → Dockerfile → static validation → optional runtime verification
+- `POST /generate/docker-compose` — analysis gate → Compose only
+- `POST /generate/{artifact}` — analysis gate → one requested artifact only
+- `POST /validate` — analysis followed by sandbox validation/repair
+- `POST /analyze-and-validate` — analysis followed by sandbox validation/repair
 - `POST /analyze-upload` — ZIP repository analysis
 - `GET /docs` — OpenAPI/Swagger UI
 
+All structured generation failures are returned as JSON objects containing a human-readable `message`, `phase`, requested artifact and the relevant analysis/validation details. The frontend explicitly normalizes these objects so they can never appear as JavaScript `[object Object]`.
+
+## What the analysis checks
+
+The analysis pass is intentionally broader than Docker generation. Depending on repository contents it examines:
+
+- repository file inventory and layout
+- primary and secondary languages
+- framework candidates and confidence
+- package managers and lockfiles
+- runtime/version constraints
+- production build scripts
+- production/dev/start/serve commands
+- executable entrypoints
+- static vs dynamic/SSR application mode
+- framework adapters and output modes
+- ports and health endpoints
+- application roles such as web, worker, scheduler and consumer
+- database/cache/external service signals
+- environment-variable and secret-file signals
+- existing Docker/Kubernetes/Terraform/serverless configuration
+- CI/CD workflows
+- direct and resolved dependencies
+- source imports and syntax structures
+- migration frameworks and destructive migration patterns
+- repository security findings
+- monorepo/workspace conditions
+- deterministic deployment blockers and strategy decisions
+
+Framework names alone are never treated as enough evidence for generation.
+
 ## Docker generation contract
 
-Dockerfile generation is intentionally stricter than ordinary analysis. The generator must resolve the repository's actual package manager and lockfile, build script, framework configuration, server adapter/output mode, runtime version, start strategy, application port, monorepo target and relevant environment constraints before producing the candidate. Framework names alone are never sufficient.
+A Dockerfile is released only when the deep analysis can establish a deterministic deployment strategy. Unknown or ambiguous repositories are blocked rather than receiving a guessed Dockerfile.
 
-The generated Dockerfile is then checked statically. The explicit generation endpoint writes the candidate into the cloned repository and uses the sandbox to perform a real Docker build, start an isolated runtime, map the detected port and issue HTTP smoke requests. Failed attempts are diagnosed and only allow-listed deterministic repairs may be applied. A failed or unavailable runtime verification means no Dockerfile is returned as a verified artifact.
-
-For example, an Astro project using `@astrojs/vercel/serverless` with `output: 'server'` is not blindly assigned `astro preview`: that adapter is host-specific and does not provide the local preview runtime. The deep pass records the adapter decision and selects a repository dev-server fallback when that is the only deterministic runnable path. Astro's documentation likewise states that `astro preview` for SSR requires an adapter that supports it, with Node being the supported preview adapter in the Astro v4 documentation.
+The current strategy matrix covers deterministic paths for static web applications and several common Node.js, Python, Go, Rust, JVM, .NET, PHP and Ruby deployments. The correct product behavior for an unsupported or ambiguous project is **explicit blocking with evidence**, not pretending every arbitrary repository can be safely containerized.
 
 ## Design principles
 
-1. **Evidence before generation.** Repository facts are collected before artifacts are synthesized.
-2. **Deep deployment analysis before Docker.** Manifests, lockfiles, scripts, framework adapters, output modes, ports and repository layout are reconciled before Dockerfile generation.
-3. **Deployment IR is the source of truth.** Docker, Compose, Kubernetes and cloud artifacts are generated from the same normalized model.
-4. **No blind AI dependency.** The core engine is deterministic and works without OpenAI or Claude API keys.
-5. **Verification before release.** A Dockerfile requested through the generation endpoint is withheld unless the sandbox can build and smoke-test it successfully.
-6. **Safety gates.** Destructive migrations, high/critical findings, low confidence and failed validation prevent automatic deployment eligibility.
-7. **Bounded repair.** Runtime failures are diagnosed and only approved deterministic mutations are attempted; unknown failures stop instead of triggering arbitrary source rewrites.
-8. **Isolation matters.** Docker runtime controls are included, but internet-scale hostile arbitrary repositories should execute in a dedicated worker with a VM/microVM boundary and no host Docker socket exposed to the API.
-9. **Pricing honesty.** The bundled pricing layer is a planning engine with a provider adapter boundary; live regional provider catalogs must be refreshed rather than pretending static numbers are live quotes.
+1. **Repository before artifact.** Understand the repository first.
+2. **No hidden generation.** Analysis does not call Docker/Compose/Kubernetes/Terraform generators.
+3. **Only requested artifacts.** A request for Dockerfile produces Dockerfile; a request for Compose produces Compose; other generators are not run as side effects.
+4. **Analysis reuse with integrity.** `analysis_id` is reusable only while the repository hash remains identical.
+5. **Deployment IR is the source of truth.** Artifact generators consume the normalized deployment model.
+6. **Deterministic first.** No OpenAI or Claude API key is required for the core pipeline.
+7. **Fail closed.** Insufficient evidence produces a blocker rather than a speculative artifact.
+8. **Structured errors.** API failures retain their diagnostic structure and are never coerced into `[object Object]` in the UI.
+9. **Verification is separate.** Static validation is part of Dockerfile generation; expensive runtime verification is explicitly controllable.
+10. **Bounded repair.** Runtime repair is allow-listed and deterministic rather than arbitrary source rewriting.
 
 ## Backend layout
 
 ```text
 backend/
-  core/            scanning, detection, deep deployment analysis, IR, AST/source analysis, dependencies, migrations, policy
-  generators/      Docker, Compose, Kubernetes, cloud Terraform
-  pricing/         deterministic cost model + provider boundary
-  sandbox/         build/runtime isolation policy, diagnostics, bounded repair
-  security/        secret/security checks, SBOM/vulnerability plans
+  core/            scanner, detection, deep analysis, IR, AST/source analysis,
+                   dependencies, migrations and policy
+  generators/      Docker, Compose, Kubernetes and cloud Terraform
+  pricing/         deterministic cost model/provider boundary
+  sandbox/         build/runtime isolation, diagnostics and bounded repair
+  security/        repository security, SBOM and vulnerability planning
   tests/            regression tests
-  main.py          FastAPI API + streaming pipeline
+  main.py          analysis-first FastAPI API
 frontend/
   index.html       dashboard shell
-  app.js           live analysis UI
+  app.js           analysis/generation UI
   app.css          dashboard styling
 ```
 
 ## Verification
 
-The backend regression suite is expected to remain green before release changes are considered complete:
+Run before release changes are considered complete:
 
 ```bash
 cd backend
