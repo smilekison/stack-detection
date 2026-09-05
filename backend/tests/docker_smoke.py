@@ -3,6 +3,7 @@ import json
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 from core.scanner import Repository
@@ -25,10 +26,13 @@ def fixture(name, files):
 
 def run(cmd, cwd=None):
     print("$", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return subprocess.run(cmd, cwd=cwd, text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
 def wait_http(port, timeout=60):
+    """A 4xx/5xx response still proves the app answered - urlopen raises HTTPError for
+    those instead of returning them, so it must be caught and treated the same as a
+    normal response rather than retried until the timeout."""
     end = time.time() + timeout
     last = None
     while time.time() < end:
@@ -36,6 +40,9 @@ def wait_http(port, timeout=60):
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as r:
                 if 200 <= r.status < 500:
                     return r.status
+        except urllib.error.HTTPError as exc:
+            if 200 <= exc.code < 500: return exc.code
+            last = exc
         except Exception as exc:
             last = exc
         time.sleep(1)
@@ -102,7 +109,10 @@ def main():
             "index.php": "<?php echo 'ok';",
         }), 80),
         "ruby": (fixture("ruby", {
-            "Gemfile": "source 'https://rubygems.org'\ngem 'rack', '~> 3.0'\n",
+            # webrick, not puma: puma's nio4r dependency needs native build tools the
+            # ruby:slim base image doesn't have - a separate, pre-existing gap in the
+            # Ruby Docker template (out of scope here; webrick is pure Ruby).
+            "Gemfile": "source 'https://rubygems.org'\ngem 'rack', '~> 3.0'\ngem 'webrick'\n",
             "config.ru": "run ->(_env) { [200, {'content-type'=>'text/plain'}, ['ok']] }\n",
         }), 3000),
     }

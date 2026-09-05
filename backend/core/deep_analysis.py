@@ -24,8 +24,8 @@ def _blocked_target(spec, result, units, reason):
     return deep
 
 
-def analyze(repo, spec, result):
-    selected, units, selection_error = select_unit(repo)
+def analyze(repo, spec, result, target=None):
+    selected, units, selection_error = select_unit(repo, preferred_root=target)
     if selection_error:
         return _blocked_target(spec, result, units, selection_error)
 
@@ -50,6 +50,6 @@ def analyze(repo, spec, result):
             result["deep_analysis"]=deep
             spec.project.update({"deep_analysis_status":"ready","deep_analysis_confidence":98,"container_decisions":deep["decisions"]})
             return deep
-    return _analyze(repo, spec, result)
+    return _analyze(repo, spec, result, target=target)
 
 __all__=["analyze"]
