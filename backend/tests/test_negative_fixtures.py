@@ -23,13 +23,45 @@ def test_recognized_unsupported_technology_blocks_rather_than_guesses(tmp_path):
 
 
 def test_polyglot_root_with_no_single_viable_target_blocks(tmp_path):
-    write(tmp_path, "package.json", '{"scripts":{"dev":"vite"}}')
+    # A genuine rival: Node has its own start script (an independently runnable server),
+    # not just a Vite build/dev-only companion to the Python backend (that narrower case
+    # - see test_polyglot_root_with_a_build_only_node_companion_resolves_to_the_backend
+    # below - is now deterministically resolved, not blocked).
+    write(tmp_path, "package.json", '{"scripts":{"start":"node server.js"}}')
+    write(tmp_path, "server.js", "require('http').createServer((q,s)=>s.end('ok')).listen(3000)\n")
     write(tmp_path, "requirements.txt", "flask\n")
     write(tmp_path, "app.py", "from flask import Flask\napp = Flask(__name__)\n")
     _, _, result = Analyzer(Repository(tmp_path)).analyze()
     deep = result["deep_analysis"]
     assert deep["status"] == "blocked"
     assert any(b["code"] == "POLYGLOT_TARGET" for b in deep["blockers"])
+
+
+def test_polyglot_root_with_a_build_only_node_companion_resolves_to_the_backend(tmp_path):
+    # The Laravel+Vite pattern, generalized: a backend framework bundling a package.json
+    # purely to compile frontend assets (no start script - `vite`/`vite build` can never
+    # run as its own production server) must not be mistaken for a rival application and
+    # silently win over the real backend, nor must it force an unnecessary ambiguity block.
+    write(tmp_path, "package.json", '{"scripts":{"build":"vite build","dev":"vite"}}')
+    write(tmp_path, "requirements.txt", "flask\n")
+    write(tmp_path, "app.py", "from flask import Flask\napp = Flask(__name__)\n")
+    _, _, result = Analyzer(Repository(tmp_path)).analyze()
+    deep = result["deep_analysis"]
+    assert deep["status"] == "ready"
+    assert result["summary"]["primary_language"] == "Python"
+
+
+def test_polyglot_root_with_php_backend_and_vite_companion_resolves_to_php(tmp_path):
+    # The actual Laravel+Vite shape: PHP is a real ecosystem candidate in the polyglot
+    # tie-break (not just node/python/go/rust), and a build/dev-only Node companion here
+    # must resolve to the PHP backend the same way it resolves to a Python one above.
+    write(tmp_path, "package.json", '{"scripts":{"build":"vite build","dev":"vite"}}')
+    write(tmp_path, "composer.json", '{"require":{"php":"^8.3"}}')
+    write(tmp_path, "public/index.php", "<?php echo 'ok';")
+    _, _, result = Analyzer(Repository(tmp_path)).analyze()
+    deep = result["deep_analysis"]
+    assert deep["status"] == "ready"
+    assert result["summary"]["primary_language"] == "PHP"
 
 
 def test_jvm_manifest_without_a_supported_framework_blocks(tmp_path):
