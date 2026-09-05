@@ -6,6 +6,11 @@ CONTROL_DIRS={"backend","frontend","server","client","api","app","web","worker",
 ENTRYPOINT_NAMES={"main.py","app.py","server.py","wsgi.py","asgi.py","main.go","main.rs","Program.cs","index.php","config.ru","index.html","Application.java","Main.java"}
 NON_RUNTIME_DIRS={"tests","test","__tests__","docs","doc","examples","example","fixtures","mocks","mock","benchmarks","benchmark","samples","sample"}
 NON_RUNTIME_NAMES={"readme.md","readme.rst","changelog.md","license","license.md"}
+SERVING_MARKERS=(
+    "StaticFiles", "FileResponse", "send_from_directory", "sendFile", "express.static",
+    "static_folder", "staticfiles", "serve-static", "WhiteNoise", "mount(", "app.mount(",
+)
+
 
 def _depth(path): return len(Path(path).parts)
 def _root_for(path):
@@ -15,6 +20,7 @@ def _under(path,root): return not root or path==root or path.startswith(root+"/"
 def _is_runtime_file(path):
     parts=Path(path).parts
     return not any(p.lower() in NON_RUNTIME_DIRS for p in parts[:-1]) and Path(path).name.lower() not in NON_RUNTIME_NAMES
+
 
 def discover_units(repo):
     """Discover one application unit per directory, including manifest-less static sites."""
@@ -35,6 +41,7 @@ def discover_units(repo):
         units.append({"id":root or ".","root":root,"manifest":None,"manifests":[],"manifest_name":None,"ecosystem":"static","ecosystems":["static"]})
     return sorted(units,key=lambda u:(_depth(u["root"]),u["root"],u["manifest"] or ""))
 
+
 def files_for_unit(repo,unit,include_nested_units=False,include_non_runtime=False):
     root=unit.get("root",""); all_units=discover_units(repo); nested={u["root"] for u in all_units if u["root"] and u["root"]!=root and _under(u["root"],root)}; out=[]
     for f in repo.files:
@@ -46,15 +53,19 @@ def files_for_unit(repo,unit,include_nested_units=False,include_non_runtime=Fals
         if m not in out: out.append(m)
     return sorted(set(out))
 
+
 def read_unit_json(repo,unit):
     m=unit.get("manifest")
     return repo.json(m) if m and m.endswith(".json") else {}
+
 
 def text(repo,unit,suffixes=None,names=None,include_nested_units=False,include_non_runtime=False):
     suffixes,names=set(suffixes or ()),set(names or ()); selected=[f for f in files_for_unit(repo,unit,include_nested_units,include_non_runtime) if Path(f).suffix.lower() in suffixes or Path(f).name in names]
     return "\n".join(f"--- {f} ---\n{repo.read(f)}" for f in selected)
 
+
 def import_text(repo,unit,extensions): return text(repo,unit,suffixes=extensions)
+
 
 def _score(repo,unit):
     files=set(files_for_unit(repo,unit)); s=40 if unit.get("manifest") else 30
@@ -63,6 +74,39 @@ def _score(repo,unit):
     if Path(unit.get("root") or ".").name in CONTROL_DIRS: s+=8
     if len(unit.get("ecosystems",[]))==1: s+=5
     return s
+
+
+def _integration_evidence(repo,host,dependency):
+    """Return concrete evidence that a host application serves another unit.
+
+    A sibling application is not suppressed merely because it is called frontend/api/etc.
+    We require both a reference to the dependency unit path and a serving mechanism. This
+    lets an application such as a FastAPI backend that serves a static frontend be selected
+    as one deployable unit, while unrelated backend/frontend monorepos remain ambiguous.
+    """
+    root=dependency.get("root") or ""
+    if not root: return []
+    source=text(repo,host,suffixes={
+        ".py",".js",".jsx",".ts",".tsx",".go",".rs",".java",".kt",".scala",
+        ".cs",".fs",".vb",".php",".rb",".ex",".exs"
+    })
+    if not source: return []
+    normalized=source.replace("\\","/")
+    root_token=root.replace("\\","/")
+    if root_token not in normalized and Path(root_token).name not in normalized: return []
+    marker_hits=[m for m in SERVING_MARKERS if m.lower() in normalized.lower()]
+    if not marker_hits: return []
+    return [f"{root_token}: referenced by host application"]+marker_hits[:3]
+
+
+def _integrated_dependencies(repo,host,units):
+    evidence=[]
+    for dependency in units:
+        if dependency is host or dependency.get("root")==host.get("root"): continue
+        hits=_integration_evidence(repo,host,dependency)
+        if hits: evidence.append({"unit":dependency,"evidence":hits})
+    return evidence
+
 
 def select_unit(repo,preferred_root=None):
     """Select a target only when evidence supports it; never silently choose a close rival."""
@@ -74,10 +118,18 @@ def select_unit(repo,preferred_root=None):
     ranked=sorted(((_score(repo,u),u) for u in units),key=lambda x:(-x[0],_depth(x[1]["root"]),x[1]["root"]))
     if len(ranked)>1:
         top_score,top=ranked[0]; second_score,second=ranked[1]
+        integrated=_integrated_dependencies(repo,top,units)
+        integrated_roots={x["unit"].get("root") for x in integrated}
+        # A concrete host->dependency serving relationship makes the host the deployable
+        # boundary. The dependency remains inventoried, but it is not treated as a rival
+        # deployment target because the host is provably responsible for serving it.
+        if second.get("root") in integrated_roots:
+            return top,units,None
         # Any second real application within 15 points of the best candidate is a
         # deployment-target ambiguity. A higher score must not become permission to guess.
         if top["root"]!=second["root"] and second_score>=max(60,top_score-15): return None,units,"ambiguous_application_units"
     return ranked[0][1],units,None
+
 
 def describe(repo):
     units=discover_units(repo); selected,_,error=select_unit(repo)
