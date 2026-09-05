@@ -1,18 +1,189 @@
 from pathlib import Path
 
+
+def _node_install(spec):
+    pm = spec.package_managers[0].get('name', 'npm') if spec.package_managers else 'npm'
+    evidence = spec.package_managers[0].get('evidence_file', '') if spec.package_managers else ''
+    if pm == 'pnpm':
+        return pm, 'RUN corepack enable && corepack prepare pnpm@latest --activate', 'COPY package.json pnpm-lock.yaml ./', 'RUN pnpm install --frozen-lockfile'
+    if pm == 'yarn':
+        return pm, 'RUN corepack enable && corepack prepare yarn@stable --activate', 'COPY package.json yarn.lock ./', 'RUN yarn install --immutable'
+    if pm == 'bun':
+        return pm, 'RUN npm install -g bun', 'COPY package.json bun.lock ./', 'RUN bun install --frozen-lockfile'
+    if evidence == 'package-lock.json' or pm == 'npm':
+        return 'npm', '', 'COPY package.json package-lock.json ./', 'RUN npm ci'
+    return 'npm', '', 'COPY package.json ./', 'RUN npm install'
+
+
 def dockerfile(spec):
-    rt=spec.runtime.get('name','Unknown');fw=spec.frameworks[0]['name'] if spec.frameworks else '';port=spec.network.get('port') or 8000;start=spec.processes[0].get('start_command','') if spec.processes else ''
-    if rt=='Node.js':
-        pm=spec.package_managers[0].get('name','npm') if spec.package_managers else 'npm';install={'pnpm':'pnpm install --frozen-lockfile','yarn':'yarn install --immutable','bun':'bun install --frozen-lockfile','npm':'npm ci'}.get(pm,'npm ci');setup={'pnpm':'RUN corepack enable && corepack prepare pnpm@latest --activate','yarn':'RUN corepack enable && corepack prepare yarn@stable --activate','bun':'RUN npm install -g bun','npm':''}.get(pm,'');build=spec.build.get('command') or 'npm run build';start=start or ('npm run start' if fw in {'Next.js','NestJS','Nuxt'} else 'npm start')
-        return f'''FROM node:22-bookworm-slim AS build\nWORKDIR /app\n{setup}\nCOPY package*.json ./\nCOPY pnpm-lock.yaml* yarn.lock* bun.lock* ./\nRUN {install}\nCOPY . .\nRUN {build}\nFROM node:22-bookworm-slim AS runtime\nENV NODE_ENV=production\nWORKDIR /app\nRUN useradd --system --uid 10001 appuser\nCOPY --from=build --chown=appuser:appuser /app /app\nUSER 10001\nEXPOSE {port}\nCMD ["sh","-c",{start!r}]\n'''
-    if rt=='Python':
-        start=start or 'python -m uvicorn main:app --host 0.0.0.0 --port 8000';install='pip install --no-cache-dir -r requirements.txt' if 'requirements.txt' in spec.project.get('files',[]) else 'pip install --no-cache-dir .'
-        return f'''FROM python:3.12-slim\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\nWORKDIR /app\nRUN useradd --system --uid 10001 appuser\nCOPY . .\nRUN {install}\nUSER 10001\nEXPOSE {port}\nCMD ["sh","-c",{start!r}]\n'''
-    if rt=='Go':return f'''FROM golang:1.24-bookworm AS build\nWORKDIR /src\nCOPY go.mod go.sum* ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app .\nFROM gcr.io/distroless/static-debian12:nonroot\nCOPY --from=build /out/app /app\nEXPOSE {port}\nUSER nonroot:nonroot\nENTRYPOINT ["/app"]\n'''
-    if rt=='Rust':return f'''FROM rust:1.88-bookworm AS build\nWORKDIR /src\nCOPY Cargo.toml Cargo.lock* ./\nCOPY . .\nRUN cargo build --release\nFROM debian:bookworm-slim\nRUN useradd --system --uid 10001 appuser\nCOPY --from=build /src/target/release /opt/app\nUSER 10001\nEXPOSE {port}\nENTRYPOINT ["/opt/app/app"]\n'''
-    if rt in {'JDK','JVM'}:return f'''FROM maven:3.9-eclipse-temurin-21 AS build\nWORKDIR /app\nCOPY . .\nRUN mvn -B -DskipTests package\nFROM eclipse-temurin:21-jre\nWORKDIR /app\nRUN useradd --system --uid 10001 appuser\nCOPY --from=build /app/target/*.jar /app/app.jar\nUSER 10001\nEXPOSE {port}\nENTRYPOINT ["java","-jar","/app/app.jar"]\n'''
-    if rt=='.NET':return f'''FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build\nWORKDIR /src\nCOPY . .\nRUN dotnet publish -c Release -o /out\nFROM mcr.microsoft.com/dotnet/aspnet:8.0\nWORKDIR /app\nRUN useradd --system --uid 10001 appuser || true\nCOPY --from=build /out .\nUSER 10001\nEXPOSE {port}\nENTRYPOINT ["dotnet","app.dll"]\n'''
-    return f'''FROM alpine:3.21\nWORKDIR /app\nCOPY . .\nRUN adduser -D -u 10001 appuser\nUSER 10001\nEXPOSE {port}\nCMD ["sh","-c",{(start or 'sleep infinity')!r}]\n'''
+    rt = spec.runtime.get('name', 'Unknown')
+    fw = spec.frameworks[0]['name'] if spec.frameworks else ''
+    port = spec.network.get('port') or 8000
+    start = spec.processes[0].get('start_command', '') if spec.processes else ''
+    strategy = spec.build.get('runtime_strategy')
+
+    if rt == 'Node.js':
+        pm, setup, manifest_copy, install = _node_install(spec)
+        build = spec.build.get('command') or 'npm run build'
+
+        if fw == 'Astro' and strategy == 'dev-server-fallback':
+            command = f'{pm} run dev -- --host 0.0.0.0 --port {port}'
+            return f'''FROM node:20-bookworm-slim AS build
+WORKDIR /app
+{setup}
+{manifest_copy}
+{install}
+COPY . .
+RUN {build}
+
+FROM node:20-bookworm-slim AS runtime
+WORKDIR /app
+RUN useradd --system --uid 10001 --no-create-home appuser
+COPY --from=build --chown=10001:10001 /app /app
+USER 10001
+ENV HOST=0.0.0.0
+ENV PORT={port}
+EXPOSE {port}
+CMD ["sh", "-c", "{command}"]
+'''
+
+        if fw == 'Astro' and strategy == 'node-standalone':
+            return f'''FROM node:20-bookworm-slim AS build
+WORKDIR /app
+{setup}
+{manifest_copy}
+{install}
+COPY . .
+RUN {build}
+
+FROM node:20-bookworm-slim AS runtime
+WORKDIR /app
+RUN useradd --system --uid 10001 --no-create-home appuser
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV PORT={port}
+COPY --from=build --chown=10001:10001 /app/dist ./dist
+COPY --from=build --chown=10001:10001 /app/node_modules ./node_modules
+USER 10001
+EXPOSE {port}
+CMD ["node", "./dist/server/entry.mjs"]
+'''
+
+        if fw == 'Astro' and strategy == 'static':
+            return f'''FROM node:20-bookworm-slim AS build
+WORKDIR /app
+{setup}
+{manifest_copy}
+{install}
+COPY . .
+RUN {build}
+
+FROM node:20-bookworm-slim AS runtime
+WORKDIR /app
+RUN useradd --system --uid 10001 --no-create-home appuser
+COPY --from=build --chown=10001:10001 /app /app
+USER 10001
+ENV HOST=0.0.0.0
+ENV PORT={port}
+EXPOSE {port}
+CMD ["sh", "-c", "{pm} run preview -- --host 0.0.0.0 --port {port}"]
+'''
+
+        command = start or ('npm run start' if fw in {'Next.js', 'NestJS', 'Nuxt'} else 'npm start')
+        return f'''FROM node:20-bookworm-slim AS build
+WORKDIR /app
+{setup}
+{manifest_copy}
+{install}
+COPY . .
+RUN {build}
+
+FROM node:20-bookworm-slim AS runtime
+WORKDIR /app
+RUN useradd --system --uid 10001 --no-create-home appuser
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV PORT={port}
+COPY --from=build --chown=10001:10001 /app /app
+USER 10001
+EXPOSE {port}
+CMD ["sh", "-c", {command!r}]
+'''
+
+    if rt == 'Python':
+        start = start or 'python -m uvicorn main:app --host 0.0.0.0 --port 8000'
+        install = 'pip install --no-cache-dir -r requirements.txt' if 'requirements.txt' in spec.project.get('files', []) else 'pip install --no-cache-dir .'
+        return f'''FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN useradd --system --uid 10001 appuser
+COPY . .
+RUN {install}
+USER 10001
+EXPOSE {port}
+CMD ["sh", "-c", {start!r}]
+'''
+    if rt == 'Go':
+        return f'''FROM golang:1.24-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app .
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/app /app
+EXPOSE {port}
+USER nonroot:nonroot
+ENTRYPOINT ["/app"]
+'''
+    if rt == 'Rust':
+        return f'''FROM rust:1.88-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock* ./
+COPY . .
+RUN cargo build --release
+FROM debian:bookworm-slim
+RUN useradd --system --uid 10001 appuser
+COPY --from=build /src/target/release /opt/app
+USER 10001
+EXPOSE {port}
+ENTRYPOINT ["/opt/app/app"]
+'''
+    if rt in {'JDK', 'JVM'}:
+        return f'''FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /app
+COPY . .
+RUN mvn -B -DskipTests package
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+RUN useradd --system --uid 10001 appuser
+COPY --from=build /app/target/*.jar /app/app.jar
+USER 10001
+EXPOSE {port}
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+'''
+    if rt == '.NET':
+        return f'''FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet publish -c Release -o /out
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+RUN useradd --system --uid 10001 appuser || true
+COPY --from=build /out .
+USER 10001
+EXPOSE {port}
+ENTRYPOINT ["dotnet", "app.dll"]
+'''
+    return f'''FROM alpine:3.21
+WORKDIR /app
+COPY . .
+RUN adduser -D -u 10001 appuser
+USER 10001
+EXPOSE {port}
+CMD ["sh", "-c", {start or 'sleep infinity'!r}]
+'''
+
 
 def compose(spec):
     p=spec.network.get('port') or 8000;extra=''
