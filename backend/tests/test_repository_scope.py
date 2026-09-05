@@ -85,3 +85,26 @@ def test_backend_and_static_frontend_are_not_silently_merged(tmp_path):
     assert len(units) == 2
     assert selected is None
     assert error == "ambiguous_application_units"
+
+
+def test_host_that_provably_serves_frontend_is_selected_as_composite_boundary(tmp_path):
+    write(tmp_path, "backend/requirements.txt", "fastapi\nuvicorn\n")
+    write(
+        tmp_path,
+        "backend/main.py",
+        "from fastapi import FastAPI\nfrom fastapi.responses import FileResponse\n"
+        "FRONTEND = 'frontend'\napp = FastAPI()\n"
+        "@app.get('/')\ndef home(): return FileResponse(FRONTEND + '/index.html')\n",
+    )
+    write(tmp_path, "frontend/package.json", '{"private":true,"name":"dashboard"}')
+    write(tmp_path, "frontend/index.html", "<html><body>frontend</body></html>")
+
+    selected, units, error = select_unit(Repository(tmp_path))
+    assert len(units) == 2
+    assert selected is not None
+    assert selected["root"] == "backend"
+    assert error is None
+
+    _, _, result = Analyzer(Repository(tmp_path)).analyze()
+    assert result["deep_analysis"]["status"] == "ready"
+    assert result["repository_model"]["selected_unit"]["root"] == "backend"
