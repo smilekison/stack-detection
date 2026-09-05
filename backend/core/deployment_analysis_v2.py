@@ -43,7 +43,18 @@ def _port(content, default, readme_port=None):
     return default
 
 
-def _module(path): return Path(path).with_suffix("").as_posix().replace("/", ".")
+def _module(path, root=""):
+    """Module path for `uvicorn`/`gunicorn`, relative to the application root, not the repo root.
+
+    A nested app (backend/main.py) is actually run from inside that directory (`cd backend &&
+    uvicorn main:app`), because its own internal imports (`from core.scanner import ...`) are
+    written relative to that root, not the repo root. A full-repo-relative module name
+    ("backend.main") looks plausible but produces a working Dockerfile that crashes at import
+    time - `docker.py` must WORKDIR/cd into the same root this module name is relative to.
+    """
+    p = Path(path)
+    if root and p.as_posix().startswith(root + "/"): p = p.relative_to(root)
+    return p.with_suffix("").as_posix().replace("/", ".")
 
 
 def _reconcile_command(manifest_command, readme_command):
@@ -234,12 +245,12 @@ def analyze(repo,spec,result,target=None):
         check("MANIFEST","Python dependency manifest","pass" if manifest else "blocker",manifests[:10])
         port=_port(_unit_text(repo,selected),8000,readme["port"]); py=[f for f in files if f.endswith(".py")]; entry=None
         if framework=="Django":
-            entry=next((f for f in py if Path(f).name=="wsgi.py"),None); start=f"gunicorn {_module(entry)}:application --bind 0.0.0.0:{port}" if entry else ""
+            entry=next((f for f in py if Path(f).name=="wsgi.py"),None); start=f"gunicorn {_module(entry,root)}:application --bind 0.0.0.0:{port}" if entry else ""
             strategy="python-gunicorn"
         elif framework in {"FastAPI","Litestar","Sanic","Starlette","Quart","Aiohttp"}:
-            entry=next((f for f in py if Path(f).name in {"main.py","app.py","server.py","application.py"} and re.search(r"(?:FastAPI|Litestar|Sanic|Starlette|Quart|Application)\s*\(",_read(repo,f),re.I)),None); start=f"uvicorn {_module(entry)}:app --host 0.0.0.0 --port {port}" if entry else ""; strategy="python-uvicorn"
+            entry=next((f for f in py if Path(f).name in {"main.py","app.py","server.py","application.py"} and re.search(r"(?:FastAPI|Litestar|Sanic|Starlette|Quart|Application)\s*\(",_read(repo,f),re.I)),None); start=f"uvicorn {_module(entry,root)}:app --host 0.0.0.0 --port {port}" if entry else ""; strategy="python-uvicorn"
         elif framework=="Flask":
-            entry=next((f for f in py if Path(f).name in {"main.py","app.py","application.py"} and re.search(r"\bapp\s*=",_read(repo,f))),None); start=f"gunicorn {_module(entry)}:app --bind 0.0.0.0:{port}" if entry else ""; strategy="python-gunicorn"
+            entry=next((f for f in py if Path(f).name in {"main.py","app.py","application.py"} and re.search(r"\bapp\s*=",_read(repo,f))),None); start=f"gunicorn {_module(entry,root)}:app --bind 0.0.0.0:{port}" if entry else ""; strategy="python-gunicorn"
         else: start=""; strategy=None
         readme_start=next((c["command"] for c in readme["commands"]["start"]["production"]),None)
         if entry and readme_start:

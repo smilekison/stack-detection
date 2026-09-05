@@ -88,6 +88,16 @@ def main():
             "requirements.txt": "fastapi==0.116.1\nuvicorn==0.35.0\n",
             "main.py": "from fastapi import FastAPI\napp=FastAPI()\n",
         }), 8000),
+        # A nested application root (backend/) whose own entrypoint imports a sibling
+        # module (core.util) relative to THAT root, not the repo root - catches the
+        # module-path regression a flat-root fixture can never exercise: a naive
+        # `uvicorn backend.main:app` run from the repo root crashes on this import even
+        # though it looks like a perfectly plausible module reference.
+        "python-nested": (fixture("python-nested", {
+            "backend/requirements.txt": "fastapi==0.116.1\nuvicorn==0.35.0\n",
+            "backend/main.py": "from fastapi import FastAPI\nfrom core.util import ok\napp=FastAPI()\n@app.get('/')\ndef root(): return {'ok': ok()}\n",
+            "backend/core/util.py": "def ok(): return True\n",
+        }), 8000),
         "go": (fixture("go", {
             "go.mod": "module smoke\n\ngo 1.24\n",
             "main.go": 'package main\nimport ("fmt"; "net/http")\nfunc main(){http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){fmt.Fprint(w,"ok")}); http.ListenAndServe(":8080",nil)}\n',

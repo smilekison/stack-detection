@@ -40,16 +40,16 @@ def dockerfile(spec):
         node = _tag(spec.runtime.get("version"), "20"); pm, setup, manifest, install = _node_install(spec); build = spec.build.get("container_command") or f"{pm} run build"
         if strategy == "dev-server-fallback":
             runtime_cmd = start or f"{pm} run dev -- --host 0.0.0.0 --port {port}"
-            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nCOPY --from=build --chown=10001:10001 /app /app\nENV HOST=0.0.0.0 PORT={port}\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(runtime_cmd)}\n'''
+            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nCOPY --from=build --chown=10001:10001 /app /app\nENV HOST=0.0.0.0 PORT={port} HOME=/app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(runtime_cmd)}\n'''
         if strategy == "node-standalone":
-            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nENV NODE_ENV=production HOST=0.0.0.0 PORT={port}\nCOPY --from=build --chown=10001:10001 /app/dist ./dist\nCOPY --from=build --chown=10001:10001 /app/node_modules ./node_modules\nUSER 10001\nEXPOSE {port}\nCMD ["node", "./dist/server/entry.mjs"]\n'''
+            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nENV NODE_ENV=production HOST=0.0.0.0 PORT={port} HOME=/app\nCOPY --from=build --chown=10001:10001 /app/dist ./dist\nCOPY --from=build --chown=10001:10001 /app/node_modules ./node_modules\nUSER 10001\nEXPOSE {port}\nCMD ["node", "./dist/server/entry.mjs"]\n'''
         if strategy == "static-preview":
             return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\nCOPY --from=build /app /app\nENV HOST=0.0.0.0 PORT={port}\nEXPOSE {port}\nCMD {_cmd(f'{pm} run preview -- --host 0.0.0.0 --port {port}')}\n'''
         if strategy == "static-node":
             output = str(spec.build.get("output") or "dist").strip("/")
             return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime\nCOPY --from=build --chown=nginx:nginx /app/{output}/ /usr/share/nginx/html/\nEXPOSE 8080\nCMD ["nginx", "-g", "daemon off;"]\n'''
         if not start: raise ValueError("No verified Node runtime command was resolved.")
-        return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nCOPY --from=build --chown=10001:10001 /app /app\nENV NODE_ENV=production HOST=0.0.0.0 PORT={port}\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
+        return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nCOPY --from=build --chown=10001:10001 /app /app\nENV NODE_ENV=production HOST=0.0.0.0 PORT={port} HOME=/app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
     if rt == "Python":
         py = _tag(spec.runtime.get("version"), "3.12"); manifest = spec.build.get("dependency_manifest")
         if not manifest:
@@ -62,7 +62,14 @@ def dockerfile(spec):
         server = "uvicorn" if strategy == "python-uvicorn" else ("gunicorn" if strategy == "python-gunicorn" else None)
         if server and server not in install: install += f" && pip install --no-cache-dir {server}"
         if not start: raise ValueError("No verified Python runtime command was resolved.")
-        return f'''FROM python:{py}-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\nWORKDIR /app\nCOPY . .\nRUN {install}\n{_user()}\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
+        # The module reference in `start` is relative to the application root (e.g. `main`,
+        # not `backend.main`), because that root's own internal imports are written relative
+        # to itself, not the repo root. Run the server from there, same as a human would
+        # `cd backend && uvicorn main:app` - COPY/install still happen at /app (repo root) so
+        # cross-directory references from the app (e.g. serving a sibling frontend/) keep working.
+        project_dir = str(spec.build.get("project_dir") or "").strip("/")
+        run_cmd = f"cd {project_dir} && {start}" if project_dir else start
+        return f'''FROM python:{py}-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/app\nWORKDIR /app\nCOPY . .\nRUN {install}\n{_user()}\nRUN chown 10001:10001 /app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(run_cmd)}\n'''
     if rt == "Go":
         command = spec.build.get("container_command") or 'CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app .'; lock = "COPY go.sum ./\n" if "go.sum" in files else ""
         return f'''FROM golang:{_tag(spec.runtime.get('version'), '1.24')}-bookworm AS build\nWORKDIR /src\nCOPY go.mod ./\n{lock}RUN go mod download\nCOPY . .\nRUN {command}\nFROM gcr.io/distroless/static-debian12:nonroot\nCOPY --from=build /out/app /app\nEXPOSE {port}\nENTRYPOINT ["/app"]\n'''
@@ -73,12 +80,12 @@ def dockerfile(spec):
         if "gradlew" in files or "build.gradle" in files or "build.gradle.kts" in files: builder, outdir, cmd = "eclipse-temurin:21-jdk", "/app/build/libs", "./gradlew bootJar --no-daemon" if "gradlew" in files else "gradle bootJar --no-daemon"
         elif "pom.xml" in files: builder, outdir, cmd = "maven:3.9-eclipse-temurin-21", "/app/target", "./mvnw -B -DskipTests package" if "mvnw" in files else "mvn -B -DskipTests package"
         else: raise ValueError("No verified Maven/Gradle build manifest was resolved.")
-        return f'''FROM {builder} AS build\nWORKDIR /app\nCOPY . .\nRUN {cmd}\nRUN mkdir -p /out && cp "$(find {outdir} -maxdepth 1 -type f -name '*.jar' ! -name '*-plain.jar' | head -n 1)" /out/app.jar\nFROM eclipse-temurin:21-jre\nWORKDIR /app\n{_user()}\nCOPY --from=build /out/app.jar /app/app.jar\nUSER 10001\nEXPOSE {port}\nENTRYPOINT ["java", "-jar", "/app/app.jar"]\n'''
+        return f'''FROM {builder} AS build\nWORKDIR /app\nCOPY . .\nRUN {cmd}\nRUN mkdir -p /out && cp "$(find {outdir} -maxdepth 1 -type f -name '*.jar' ! -name '*-plain.jar' | head -n 1)" /out/app.jar\nFROM eclipse-temurin:21-jre\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nENV HOME=/app\nCOPY --from=build --chown=10001:10001 /out/app.jar /app/app.jar\nUSER 10001\nEXPOSE {port}\nENTRYPOINT ["java", "-jar", "/app/app.jar"]\n'''
     if rt == ".NET":
         project = spec.build.get("project_file");
         if not project: raise ValueError("No verified .csproj was resolved.")
         name = spec.build.get("assembly") or Path(project).stem; tfm = str(spec.runtime.get("version", "net8.0")); m = re.search(r"net(\d+)(?:\.(\d+))?", tfm, re.I); net = f"{m.group(1)}.{m.group(2) or '0'}" if m else "8.0"
-        return f'''FROM mcr.microsoft.com/dotnet/sdk:{net} AS build\nWORKDIR /src\nCOPY . .\nRUN dotnet restore {project}\nRUN dotnet publish {project} -c Release --no-restore -o /out\nFROM mcr.microsoft.com/dotnet/aspnet:{net}\nWORKDIR /app\n{_user()}\nCOPY --from=build /out .\nUSER 10001\nENV ASPNETCORE_URLS=http://0.0.0.0:{port}\nEXPOSE {port}\nENTRYPOINT ["dotnet", "/app/{name}.dll"]\n'''
+        return f'''FROM mcr.microsoft.com/dotnet/sdk:{net} AS build\nWORKDIR /src\nCOPY . .\nRUN dotnet restore {project}\nRUN dotnet publish {project} -c Release --no-restore -o /out\nFROM mcr.microsoft.com/dotnet/aspnet:{net}\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nCOPY --from=build --chown=10001:10001 /out .\nUSER 10001\nENV ASPNETCORE_URLS=http://0.0.0.0:{port} HOME=/app\nEXPOSE {port}\nENTRYPOINT ["dotnet", "/app/{name}.dll"]\n'''
     if rt == "PHP":
         root = spec.build.get("document_root", ".")
         if "composer.json" in files:
@@ -94,7 +101,7 @@ def dockerfile(spec):
         # `COPY . .`: that copy brings back the host's original Gemfile, overwriting any
         # patch applied earlier, so patching before it would silently be undone.
         ensure_rackup = "RUN grep -q rackup Gemfile || echo \"gem 'rackup'\" >> Gemfile && bundle install\n" if strategy == "ruby-rack" else ""
-        return f'''FROM ruby:{ruby}-slim\nWORKDIR /app\nCOPY Gemfile ./\n{lock}RUN bundle install\nCOPY . .\n{ensure_rackup}{_user()}\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
+        return f'''FROM ruby:{ruby}-slim\nWORKDIR /app\nCOPY Gemfile ./\n{lock}RUN bundle install\nCOPY . .\n{ensure_rackup}{_user()}\nRUN chown 10001:10001 /app\nENV HOME=/app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
     raise ValueError(f"No verified Docker generation strategy for runtime={rt}, strategy={strategy}")
 
 

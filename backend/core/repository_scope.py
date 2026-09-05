@@ -69,9 +69,18 @@ def import_text(repo,unit,extensions): return text(repo,unit,suffixes=extensions
 
 def _score(repo,unit):
     files=set(files_for_unit(repo,unit)); s=40 if unit.get("manifest") else 30
-    if any(Path(f).name in ENTRYPOINT_NAMES for f in files): s+=25
-    if unit.get("root")=="": s+=8
-    if Path(unit.get("root") or ".").name in CONTROL_DIRS: s+=8
+    is_root=unit.get("root")==""; is_control_dir=Path(unit.get("root") or ".").name in CONTROL_DIRS
+    has_entrypoint=any(Path(f).name in ENTRYPOINT_NAMES for f in files)
+    # A manifest-holding unit gets the entrypoint bonus unconditionally - a real second
+    # signal on top of the manifest. A manifest-less (static) unit only gets it when it's
+    # also at the repository root or in a conventionally-named app directory: a bare
+    # index.html sitting in an arbitrarily-named nested folder (a theme/asset/reference
+    # directory, say) is not meaningfully stronger evidence than the fact that already
+    # made it a candidate unit in the first place, and must not outscore an actual
+    # manifest-backed application root purely on that single, already-counted signal.
+    if has_entrypoint and (unit.get("manifest") or is_root or is_control_dir): s+=25
+    if is_root: s+=8
+    if is_control_dir: s+=8
     if len(unit.get("ecosystems",[]))==1: s+=5
     return s
 
