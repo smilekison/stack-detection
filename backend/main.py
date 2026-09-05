@@ -1,8 +1,9 @@
 from fastapi import FastAPI,HTTPException,UploadFile,File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse,StreamingResponse
 from pydantic import BaseModel,HttpUrl,Field
 from pathlib import Path
-import tempfile,subprocess,shutil,zipfile,os,uuid
+import tempfile,subprocess,shutil,zipfile,os,uuid,json,time
 from core.scanner import Repository
 from core.engine import Analyzer
 from core.ast import ASTAnalyzer
@@ -18,61 +19,128 @@ from sandbox.runner import Sandbox
 from sandbox.repair import candidates as repair_candidates,apply as repair_apply
 from sandbox.policy import DEFAULT_POLICY,validate_policy
 from core.policy import deployment_gate
+
+APP_ROOT=Path(__file__).resolve().parents[1];FRONTEND=APP_ROOT/'frontend'
 app=FastAPI(title='AutoDeploy Stack Intelligence',version='1.0.0',description='Deterministic repository-to-deployment analysis and bounded validation/repair engine.')
 app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_methods=['*'],allow_headers=['*'])
 class AnalyzeRequest(BaseModel):
- repo_url:HttpUrl;run_validation:bool=False;max_repair_attempts:int=Field(default=3,ge=1,le=5);providers:list[str]=Field(default_factory=lambda:['aws','gcp','azure']);run_security_tools:bool=False
-class ValidateRequest(AnalyzeRequest):run_validation:bool=True
+ repo_url:HttpUrl
+ run_validation:bool=False
+ max_repair_attempts:int=Field(default=3,ge=1,le=5)
+ providers:list[str]=Field(default_factory=lambda:['aws','gcp','azure'])
+ run_security_tools:bool=False
+class ValidateRequest(AnalyzeRequest): run_validation:bool=True
+
+def emit(events,phase,message,status='running',**extra):
+ e={'id':str(uuid.uuid4()),'time':time.time(),'phase':phase,'message':message,'status':status};e.update(extra);events.append(e);return e
+
 def clone(url):
  tmp=tempfile.mkdtemp(prefix='autodeploy-repo-');target=Path(tmp)/'repo';p=subprocess.run(['git','clone','--depth','1','--no-tags','--filter=blob:none',str(url),str(target)],capture_output=True,text=True,timeout=180)
  if p.returncode:shutil.rmtree(tmp,ignore_errors=True);raise HTTPException(400,'Git clone failed: '+p.stderr[-3000:])
  return tmp,target
+
 def extract_zip(data):
- tmp=tempfile.mkdtemp(prefix='autodeploy-zip-');root=Path(tmp)/'repo';root.mkdir()
+ tmp=tempfile.mkdtemp(prefix='autodeploy-zip-');z=Path(tmp)/'upload.zip';z.write_bytes(data);root=Path(tmp)/'repo';root.mkdir()
  try:
-  import io
-  with zipfile.ZipFile(io.BytesIO(data)) as z:
-   for info in z.infolist():
-    target=(root/info.filename).resolve()
-    if not str(target).startswith(str(root.resolve())+os.sep):raise HTTPException(400,'Unsafe ZIP path detected.')
-   z.extractall(root)
+  with zipfile.ZipFile(z) as a:
+   for i in a.infolist():
+    t=(root/i.filename).resolve()
+    if not str(t).startswith(str(root.resolve())+os.sep):raise HTTPException(400,'Unsafe ZIP path detected.')
+   a.extractall(root)
  except zipfile.BadZipFile:shutil.rmtree(tmp,ignore_errors=True);raise HTTPException(400,'Invalid ZIP archive.')
  children=[p for p in root.iterdir() if p.is_dir()]
- if len(children)==1 and not any(root.iterdir()):root=children[0]
- elif len(children)==1 and not (root/'package.json').exists() and not (root/'pyproject.toml').exists():root=children[0]
+ if len(children)==1 and not (root/'package.json').exists() and not (root/'pyproject.toml').exists():root=children[0]
  return tmp,root
-def analyze_root(root,providers):
- repo=Repository(root);analyzer=Analyzer(repo);spec,_,result=analyzer.analyze();spec.dependencies=graph(repo);spec.migrations=migration_analyze(repo);findings=audit(repo);ast=ASTAnalyzer(repo).analyze();spec.security={'findings':[x.__dict__ for x in findings]};files={'Dockerfile':dockerfile(spec),'compose.yaml':compose(spec),'.dockerignore':'.git\n.github\n.env\n.env.*\nnode_modules\n__pycache__\n*.pyc\n.venv\ncoverage\n*.log\n.gitignore'};files['k8s.yaml']=kubernetes(spec)
+
+def analyze_root(root,providers,events=None):
+ events=events if events is not None else [];emit(events,'acquisition','Repository acquired and workspace created.','done')
+ repo=Repository(root);emit(events,'inventory',f'Indexed {len(repo.files):,} files ({repo.size_bytes():,} bytes of source/config data).','done',file_count=len(repo.files))
+ analyzer=Analyzer(repo);emit(events,'languages','Checking source extensions and language markers…');spec,evidence,result=analyzer.analyze()
+ emit(events,'languages',f"Detected primary language: {result['summary']['primary_language']}",'done',data=result['languages'])
+ emit(events,'runtime',f"Resolved runtime: {result['summary']['runtime']} {result['summary']['runtime_version']}",'done')
+ emit(events,'frameworks',f"Framework candidates: {', '.join(x['name'] for x in result['frameworks']) or 'none'}",'done',data=result['frameworks'])
+ emit(events,'package_managers',f"Package managers: {', '.join(x['name'] for x in spec.package_managers) or 'none'}",'done',data=spec.package_managers)
+ emit(events,'entrypoints',f"Build: {result['summary']['build_command']} · Start: {result['summary']['start_command']} · Port: {result['summary']['port']}",'done')
+ emit(events,'services',f"Detected services: {', '.join(result['summary']['services']) or 'none'}",'done',data=spec.services)
+ emit(events,'environment',f"Collected {len(result['summary']['environment_variables'])} environment-variable signals.",'done')
+ emit(events,'infrastructure',f"Found {len(spec.infrastructure.get('files',[]))} infrastructure/config files.",'done',data=spec.infrastructure)
+ emit(events,'ci_cd',f"Found {len(spec.ci_cd.get('workflows',[]))} CI/CD workflow definitions.",'done')
+ emit(events,'dependencies','Building dependency graph from manifests and lockfiles…');spec.dependencies=graph(repo);emit(events,'dependencies',f"Dependency graph: {spec.dependencies.get('direct_count',0)} direct, {spec.dependencies.get('resolved_count',0)} resolved.",'done',data=spec.dependencies)
+ emit(events,'ast','Analyzing source imports and syntax structures across detected languages…');ast=ASTAnalyzer(repo).analyze();emit(events,'ast','AST/source analysis completed.','done',data=ast)
+ emit(events,'migrations','Checking migration frameworks and destructive database operations…');spec.migrations=migration_analyze(repo);mm='Manual approval required.' if spec.migrations.get('requires_manual_approval') else 'No destructive migration requiring approval detected.';emit(events,'migrations',mm,'warning' if spec.migrations.get('requires_manual_approval') else 'done',data=spec.migrations)
+ emit(events,'security','Running repository security policy checks…');findings=audit(repo);spec.security={'findings':[x.__dict__ for x in findings]};emit(events,'security',f'Security policy found {len(findings)} finding(s).','warning' if any(x.severity in {'critical','high'} for x in findings) else 'done',data=spec.security)
+ emit(events,'artifacts','Synthesizing deployment artifacts from the Deployment IR…');files={'Dockerfile':dockerfile(spec),'compose.yaml':compose(spec),'.dockerignore':'.git\n.github\n.env\n.env.*\nnode_modules\n__pycache__\n*.pyc\n.venv\ncoverage\n*.log\n.gitignore'};files['k8s.yaml']=kubernetes(spec)
  for p in providers:
   if p in {'aws','gcp','azure'}:files[f'terraform-{p}.tf']=terraform(spec,p)
- validation=static_dockerfile(files['Dockerfile']);pricing={p:PricingEngine().estimate(spec,p) for p in providers if p in {'aws','gcp','azure'}};spec.cloud={'providers':providers,'artifacts':list(files)};spec.policy={'confidence':result['summary']['confidence'],'requires_manual_approval':spec.migrations.get('requires_manual_approval',False)}
- result.update({'sandbox_policy':validate_policy(),'deployment_ir':spec.to_dict(),'generated_files':files,'ast':ast,'dependency_graph':spec.dependencies,'migrations':spec.migrations,'security':{'findings':[x.__dict__ for x in findings],'sbom':sbom_plan(repo,result['summary']['package_manager']),'vulnerability_scan':vulnerability_plan(),'policy':security_policy(findings)},'static_validation':validation,'cloud_cost_estimates':pricing,'analysis_id':str(uuid.uuid4()),'repository':{'path_count':len(repo.files),'size_bytes':repo.size_bytes(),'hash':repo.hash()}});return result,repo,spec
-def autonomous_validate(root,result,spec,max_attempts,run_security_tools=False):
- sb=Sandbox(root);attempts=[];ledger=[];current=dockerfile(spec)
+ emit(events,'docker','Dockerfile generated from detected runtime, framework, build and entrypoint evidence.','done');emit(events,'compose','docker-compose configuration generated from detected application roles and services.','done')
+ emit(events,'validation','Running deterministic Dockerfile validation…');validation=static_dockerfile(files['Dockerfile']);emit(events,'validation','Dockerfile static validation passed.' if validation['valid'] else 'Dockerfile static validation found blocking issues.','done' if validation['valid'] else 'warning',data=validation)
+ emit(events,'pricing','Calculating deterministic cloud planning estimates…');pricing={p:PricingEngine().estimate(spec,p) for p in providers if p in {'aws','gcp','azure'}};emit(events,'pricing','Cloud planning estimates calculated.','done',data=pricing)
+ spec.cloud={'providers':providers,'artifacts':list(files.keys())};spec.policy={'confidence':result['summary']['confidence'],'requires_manual_approval':spec.migrations.get('requires_manual_approval',False),'auto_deploy_eligible':result['summary']['confidence']>=80 and not spec.migrations.get('requires_manual_approval',False) and validation['valid'] and not any(x['severity'] in {'critical','high'} for x in spec.security['findings'])}
+ result.update({'sandbox_policy':validate_policy(DEFAULT_POLICY),'deployment_ir':spec.to_dict(),'generated_files':files,'ast':ast,'dependency_graph':spec.dependencies,'migrations':spec.migrations,'security':{'findings':[x.__dict__ for x in findings],'sbom':sbom_plan(repo,result['summary']['package_manager']),'vulnerability_scan':vulnerability_plan(),'policy':security_policy(findings)},'static_validation':validation,'cloud_cost_estimates':pricing,'analysis_id':str(uuid.uuid4()),'repository':{'path_count':len(repo.files),'size_bytes':repo.size_bytes(),'hash':repo.hash()}});emit(events,'complete','Repository analysis complete.','done',data={'analysis_id':result['analysis_id'],'confidence':result['summary']['confidence']});return result,repo,spec
+
+def autonomous_validate(root,result,spec,max_attempts,run_security_tools=False,events=None):
+ events=events if events is not None else [];sb=Sandbox(root);attempts=[];ledger=[];current=dockerfile(spec)
  try:
   for i in range(min(max_attempts,DEFAULT_POLICY.max_repair_attempts)):
-   Path(root,'Dockerfile').write_text(current);outcome=sb.build_and_test(port=spec.network.get('port') or 8000,health_path=spec.network.get('health_endpoint') or '/');outcome['attempt']=i+1;attempts.append(outcome)
-   if run_security_tools and outcome.get('status') in {'runtime_healthy','runtime_started'}:outcome['security_scan']=sb.security_scan(outcome.get('image_tag'))
+   emit(events,'sandbox',f'Build attempt {i+1}/{max_attempts}: creating ephemeral build/runtime environment…');Path(root,'Dockerfile').write_text(current);outcome=sb.build_and_test(port=spec.network.get('port') or 8000,health_path=spec.network.get('health_endpoint') or '/');outcome['attempt']=i+1;attempts.append(outcome);emit(events,'sandbox',f"Attempt {i+1}: {outcome.get('status','unknown')}",'done' if outcome.get('status')=='runtime_healthy' else 'warning',data=outcome)
+   if run_security_tools and outcome.get('status') in {'runtime_healthy','runtime_started'}:
+    emit(events,'security','Running runtime image SBOM/vulnerability tools…');image=outcome.get('image_tag');outcome['security_scan']=sb.security_scan(image);emit(events,'security','Runtime security scan completed.','done',data=outcome['security_scan'])
    if outcome.get('status')=='runtime_healthy':ledger.append({'attempt':i+1,'result':'pass','repair':None});break
-   actions=repair_candidates(spec,outcome);repair=repair_apply(spec,outcome,Repository(root));ledger.append({'attempt':i+1,'result':outcome.get('status'),'diagnosis':outcome.get('diagnosis'),'candidates':actions,'repair':repair})
+   emit(events,'repair','Diagnosing failure and evaluating bounded deterministic repairs…');actions=repair_candidates(spec,outcome);repair=repair_apply(spec,outcome,Repository(root));ledger.append({'attempt':i+1,'result':outcome.get('status'),'diagnosis':outcome.get('diagnosis'),'candidates':actions,'repair':repair});emit(events,'repair',repair.get('message','Repair evaluation completed.'),'done' if repair.get('changed') else 'warning',data={'candidates':actions,'repair':repair})
    if not repair.get('changed'):break
    current=dockerfile(spec)
   result['validation']={'status':'passed' if attempts and attempts[-1].get('status')=='runtime_healthy' else 'not_passed','attempts':attempts,'repair_ledger':ledger,'max_attempts':max_attempts,'autonomous_repair':bool(any(x.get('repair',{}).get('changed') for x in ledger))};result['deployment_gate']=deployment_gate(spec,result.get('static_validation',{}),result.get('security',{}).get('findings',[]),result['validation'])
  finally:sb.cleanup()
  return result
+
+@app.get('/')
+def root():
+ index=FRONTEND/'index.html'
+ return FileResponse(index) if index.exists() else {'service':'AutoDeploy Stack Intelligence','version':app.version,'docs':'/docs'}
+@app.get('/frontend/{asset_path:path}')
+def frontend_asset(asset_path:str):
+ target=(FRONTEND/asset_path).resolve()
+ if not str(target).startswith(str(FRONTEND.resolve())+os.sep) or not target.is_file():raise HTTPException(404,'Frontend asset not found.')
+ return FileResponse(target)
 @app.get('/health')
 def health():return {'status':'ok','version':app.version,'engine':'deterministic-v1'}
 @app.post('/analyze')
 def analyze(req:AnalyzeRequest):
  tmp,root=clone(req.repo_url)
- try:return analyze_root(root,req.providers)[0]
+ try:d,_,_=analyze_root(root,req.providers);return d
+ finally:shutil.rmtree(tmp,ignore_errors=True)
+@app.post('/analyze-stream')
+def analyze_stream(req:AnalyzeRequest):
+ def stream():
+  try:
+   yield json.dumps({'type':'meta','analysis_id':str(uuid.uuid4()),'phase':'start','message':'Starting repository intelligence pipeline.'})+'\n';tmp,root=clone(req.repo_url)
+   try:
+    events=[];result,_,_=analyze_root(root,req.providers,events)
+    for e in events:yield json.dumps({'type':'event',**e},default=str)+'\n'
+    yield json.dumps({'type':'result','data':result},default=str)+'\n'
+   finally:shutil.rmtree(tmp,ignore_errors=True)
+  except Exception as exc:yield json.dumps({'type':'error','message':str(exc)})+'\n'
+ return StreamingResponse(stream(),media_type='application/x-ndjson',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
+@app.post('/generate/dockerfile')
+def generate_dockerfile(req:AnalyzeRequest):
+ tmp,root=clone(req.repo_url)
+ try:
+  d,_,_=analyze_root(root,req.providers);return {'analysis_id':d['analysis_id'],'summary':d['summary'],'stacks':{'languages':d['languages'],'frameworks':d['frameworks'],'services':d['summary']['services']},'dockerfile':d['generated_files']['Dockerfile'],'deployment_ir':d['deployment_ir'],'static_validation':d['static_validation']}
+ finally:shutil.rmtree(tmp,ignore_errors=True)
+@app.post('/generate/docker-compose')
+def generate_compose(req:AnalyzeRequest):
+ tmp,root=clone(req.repo_url)
+ try:
+  d,_,_=analyze_root(root,req.providers);return {'analysis_id':d['analysis_id'],'summary':d['summary'],'stacks':{'languages':d['languages'],'frameworks':d['frameworks'],'services':d['summary']['services']},'compose':d['generated_files']['compose.yaml'],'deployment_ir':d['deployment_ir']}
  finally:shutil.rmtree(tmp,ignore_errors=True)
 @app.post('/analyze-upload')
-async def analyze_upload(file:UploadFile=File(...),run_validation:bool=False,max_repair_attempts:int=3):
+async def analyze_upload(file:UploadFile=File(...),validate:bool=False,max_repair_attempts:int=3):
  if not file.filename or not file.filename.lower().endswith('.zip'):raise HTTPException(400,'Upload a .zip repository archive.')
  tmp,root=extract_zip(await file.read())
  try:
-  d,_,spec=analyze_root(root,['aws','gcp','azure']);return autonomous_validate(root,d,spec,max_repair_attempts) if run_validation else d
+  d,_,spec=analyze_root(root,['aws','gcp','azure'])
+  if validate:d=autonomous_validate(root,d,spec,max_repair_attempts)
+  return d
  finally:shutil.rmtree(tmp,ignore_errors=True)
 @app.post('/validate')
 def validate(req:ValidateRequest):
