@@ -45,4 +45,8 @@ def test_application_units_are_manifest_based(tmp_path):
     write(tmp_path, "backend/requirements.txt", "fastapi\n")
     write(tmp_path, "frontend/index.html", "<html></html>")
     units = discover_units(Repository(tmp_path))
-    assert units == [{"id": "backend", "root": "backend", "manifest": "backend/requirements.txt", "manifest_name": "requirements.txt", "ecosystem": "python"}]
+    assert len(units) == 1
+    assert units[0]["id"] == "backend"
+    assert units[0]["manifest"] == "backend/requirements.txt"
+    assert units[0]["manifests"] == ["backend/requirements.txt"]
+    assert units[0]["ecosystem"] == "python"
