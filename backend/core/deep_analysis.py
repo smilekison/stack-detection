@@ -1,6 +1,5 @@
 from pathlib import Path
 import re
-
 LOCKFILES={'npm':'package-lock.json','pnpm':'pnpm-lock.yaml','yarn':'yarn.lock','bun':'bun.lock'}
 def _pkg(r): return r.json('package.json') if 'package.json' in r.file_set else {}
 def _first(r,names): return next((f for f in r.files if Path(f).name in names),None)
@@ -15,7 +14,6 @@ def _script(pkg,n): return (pkg.get('scripts') or {}).get(n)
 def _static(r,primary,framework):
     server_ext={'.py','.go','.rs','.java','.kt','.cs','.php','.rb','.ex','.exs'}
     return 'package.json' not in r.file_set and framework in {'Unknown',''} and any(Path(f).name=='index.html' for f in r.files) and not any(Path(f).suffix in server_ext for f in r.files)
-
 def analyze(repo,spec,result):
     checks=[];warnings=[];blockers=[];decisions=[];pkg=_pkg(repo);primary=result['summary'].get('primary_language');framework=result['summary'].get('framework');pm=result['summary'].get('package_manager');spec.project['files']=list(repo.files)
     def check(code,title,status,evidence=None,detail=''):
@@ -23,8 +21,8 @@ def analyze(repo,spec,result):
         if status=='blocker':blockers.append(x)
         elif status=='warning':warnings.append(x)
     if _static(repo,primary,framework):
-        spec.runtime={'name':'Static Web','version':'nginx:1.27-alpine'};spec.frameworks=[];spec.package_managers=[];spec.build={'command':'none','runtime_strategy':'static-nginx','output':'repository-root'};spec.processes=[{'role':'web','start_command':'nginx -g "daemon off;"'}];spec.network.update({'port':80,'health_endpoint':'/'})
-        check('STATIC_ENTRYPOINT','Static HTML entrypoint','pass',[f for f in repo.files if Path(f).name=='index.html'][:3],'Static site detected; no application runtime is required.');check('STATIC_RUNTIME','Static runtime','pass',[],'Nginx will serve repository content.');decisions += [{'code':'TARGET','decision':'static-nginx','reason':'No server runtime or package build system detected.'},{'code':'PORT','decision':80,'reason':'Nginx default HTTP port.'}]
+        spec.runtime={'name':'Static Web','version':'nginx-unprivileged:alpine'};spec.frameworks=[];spec.package_managers=[];spec.build={'command':'none','runtime_strategy':'static-nginx','output':'repository-root'};spec.processes=[{'role':'web','start_command':'nginx -g "daemon off;"'}];spec.network.update({'port':8080,'health_endpoint':'/'})
+        check('STATIC_ENTRYPOINT','Static HTML entrypoint','pass',[f for f in repo.files if Path(f).name=='index.html'][:3],'Static site detected; no application runtime is required.');check('STATIC_RUNTIME','Static runtime','pass',[],'Unprivileged nginx will serve repository content on port 8080.');decisions += [{'code':'TARGET','decision':'static-nginx','reason':'No server runtime or package build system detected.'},{'code':'PORT','decision':8080,'reason':'Unprivileged nginx default HTTP port.'}]
     elif primary in {'JavaScript','TypeScript'} or 'package.json' in repo.file_set:
         scripts=pkg.get('scripts') or {};lock=LOCKFILES.get(pm);has_lock=bool(lock and lock in repo.file_set);check('NODE_MANIFEST','Node package manifest','pass' if 'package.json' in repo.file_set else 'blocker',['package.json'] if 'package.json' in repo.file_set else [],'package.json required for deterministic Node builds.')
         if pm in LOCKFILES: check('LOCKFILE_MATCH','Package manager and lockfile','pass' if has_lock else 'warning',[lock] if has_lock else ['package.json'],f'{pm} lockfile '+('present.' if has_lock else 'missing; npm install fallback will be used.'))
@@ -58,7 +56,7 @@ def analyze(repo,spec,result):
     elif primary=='Rust':
         check('RUST_MANIFEST','Cargo manifest','pass' if 'Cargo.toml' in repo.file_set else 'blocker',['Cargo.toml'] if 'Cargo.toml' in repo.file_set else [],'Cargo.toml controls build.');cargo=repo.read('Cargo.toml') if 'Cargo.toml' in repo.file_set else '';m=re.search(r'^\s*name\s*=\s*["\']([^"\']+)',cargo,re.M);binary=m.group(1) if m else Path(repo.root).name.replace('-','_');spec.build.update({'runtime_strategy':'rust-binary','binary':binary,'container_command':'cargo build --release'});spec.processes[0]['start_command']=f'/app/{binary}';spec.network['port']=_port(repo.corpus,8080)
     elif primary=='Java':
-        manifest='pom.xml' if 'pom.xml' in repo.file_set else ('build.gradle' if 'build.gradle' in repo.file_set else 'build.gradle.kts' if 'build.gradle.kts' in repo.file_set else None);check('JVM_BUILD','JVM build manifest','pass' if manifest else 'blocker',[manifest] if manifest else [],'Maven/Gradle build detected.' if manifest else 'No JVM build manifest.')
+        manifest='pom.xml' if 'pom.xml' in repo.file_set else ('build.gradle' if 'build.gradle' in repo.file_set else 'build.gradle.kts' if 'build.gradle.kts' in repo.file_set else None);check('JVM_BUILD','JVM build manifest','pass' if manifest else 'blocker',[manifest] if manifest else [],'Maven/Gradle build detected.' if manifest else 'No JVM build manifest.');
         if manifest and 'spring-boot' in repo.lower:spec.build.update({'runtime_strategy':'jvm-jar','container_command':'mvn -B -DskipTests package'});spec.processes[0]['start_command']='java -jar /app/app.jar';spec.network['port']=_port(repo.corpus,8080)
         else:check('JVM_ENTRYPOINT','JVM runtime entrypoint','blocker',[],'No deterministic web runtime artifact was identified.')
     elif primary=='C#':
@@ -66,7 +64,7 @@ def analyze(repo,spec,result):
         if cs:
             name=Path(cs).stem;spec.build.update({'runtime_strategy':'dotnet-publish','project_file':cs,'assembly':name});spec.processes[0]['start_command']=f'dotnet /app/{name}.dll';spec.network['port']=_port(repo.corpus,8080)
     elif primary=='PHP':
-        check('PHP_COMPOSER','Composer manifest','pass' if 'composer.json' in repo.file_set else 'warning',['composer.json'] if 'composer.json' in repo.file_set else [],'Composer dependency manifest.');root='public' if any(f.startswith('public/') for f in repo.files) else '';entry=any(Path(f).name=='index.php' for f in repo.files);check('PHP_ENTRYPOINT','PHP web document root','pass' if root or entry else 'blocker',[],'PHP web entrypoint identified.' if root or entry else 'No deterministic document root.')
+        check('PHP_COMPOSER','Composer manifest','pass' if 'composer.json' in repo.file_set else 'warning',['composer.json'] if 'composer.json' in repo.file_set else [],'Composer dependency manifest.');root='public' if any(f.startswith('public/') for f in repo.files) else '';entry=any(Path(f).name=='index.php' for f in repo.files);check('PHP_ENTRYPOINT','PHP web document root','pass' if root or entry else 'blocker',[],'PHP web entrypoint identified.' if root or entry else 'No deterministic document root.');
         if root or entry:spec.build.update({'runtime_strategy':'php-apache','document_root':root or '.'});spec.network['port']=80;spec.processes[0]['start_command']='apache2-foreground'
     elif primary=='Ruby':
         check('RUBY_BUNDLE','Bundler manifest','pass' if 'Gemfile' in repo.file_set else 'blocker',['Gemfile'] if 'Gemfile' in repo.file_set else [],'Gemfile detected.');spec.build['runtime_strategy']='ruby-rack' if 'config.ru' in repo.file_set else 'unknown';spec.network['port']=_port(repo.corpus,3000)
