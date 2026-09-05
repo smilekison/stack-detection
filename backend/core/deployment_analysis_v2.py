@@ -30,6 +30,17 @@ def _read(repo, path): return repo.read(path) if path else ""
 
 def _files(repo, unit): return files_for_unit(repo, unit)
 
+# Binaries an app shells out to at runtime (subprocess/child_process/system) are genuine
+# executable evidence (Tier 3) that manifest/lockfile scanning can never see - the
+# dependency isn't a package, it's a CLI tool. Starts with the one concrete, reproduced
+# case (a Python app calling `git clone` via subprocess) rather than guessing a broad list
+# without evidence; extend this dict only when a real case demonstrates the gap.
+PY_SUBPROCESS_BINARIES = {"git": r"subprocess\.(?:run|call|Popen|check_call|check_output)\(\s*\[\s*['\"]git['\"]"}
+
+
+def _system_packages(source_text, markers):
+    return sorted(pkg for pkg, pat in markers.items() if re.search(pat, source_text or ""))
+
 def _port(content, default, readme_port=None):
     # README (Tier 2) outranks a generic source-code port scan (Tier 3, PROGRAM.md's own
     # "port binding" example under source evidence) - checked first, not just as a fallback
@@ -158,12 +169,30 @@ def _source_profile(repo, unit):
     return sorted(((LANGUAGE_NAMES.get(k,k),v) for k,v in counts.items()),key=lambda x:-x[1])
 
 
+def _manifest_text(repo,unit):
+    manifests=unit.get("manifests") or ([unit.get("manifest")] if unit.get("manifest") else [])
+    return "\n".join(_read(repo,m) for m in manifests if m)
+
+
 def _services(repo,unit):
-    t=_unit_text(repo,unit).lower(); rules={"PostgreSQL":("postgresql","postgres","psycopg","asyncpg","pgx","prisma","typeorm"),"MySQL":("mysql","mysql2","pymysql"),"MariaDB":("mariadb",),"MongoDB":("mongodb","mongoose","motor"),"Redis":("redis","ioredis","redis-py"),"RabbitMQ":("rabbitmq","amqp","pika","aio-pika"),"Kafka":("kafka","kafkajs","confluent-kafka"),"Elasticsearch":("elasticsearch","opensearch"),"S3/Object Storage":("s3","aws-sdk","boto3","minio"),"Supabase":("supabase",),"Firebase":("firebase",),"Stripe":("stripe",),"DynamoDB":("dynamodb",),"SQLite":("sqlite","sqlite3")}
+    # Dependency-manifest evidence only (Tier 1), not arbitrary unit source text: these
+    # needles are mostly bare package/service names ('redis', 'kafka', 'stripe'...), and a
+    # generic source-text scan matched this very module's own SERVICES rules table as
+    # "evidence" that stack-detection itself uses all 14 listed services - the same
+    # detector-source-becomes-its-own-evidence bug fixed twice already today, elsewhere.
+    t=_manifest_text(repo,unit).lower(); rules={"PostgreSQL":("postgresql","postgres","psycopg","asyncpg","pgx","prisma","typeorm"),"MySQL":("mysql","mysql2","pymysql"),"MariaDB":("mariadb",),"MongoDB":("mongodb","mongoose","motor"),"Redis":("redis","ioredis","redis-py"),"RabbitMQ":("rabbitmq","amqp","pika","aio-pika"),"Kafka":("kafka","kafkajs","confluent-kafka"),"Elasticsearch":("elasticsearch","opensearch"),"S3/Object Storage":("s3","aws-sdk","boto3","minio"),"Supabase":("supabase",),"Firebase":("firebase",),"Stripe":("stripe",),"DynamoDB":("dynamodb",),"SQLite":("sqlite","sqlite3")}
     return [{"name":n,"signals":[x for x in needles if x in t][:5]} for n,needles in rules.items() if any(x in t for x in needles)]
 
 
-def _unit_text(repo,unit): return scoped_text(repo,unit)
+# scoped_text() with no suffixes/names selects nothing at all (repository_scope.text()
+# requires an explicit filter) - this was returning "" unconditionally, silently disabling
+# every _port()/_health()/_services() call built on it in favor of whatever hardcoded
+# default happened to be passed alongside. Same suffix set repository_scope's own source
+# scan (_integration_evidence) already uses, for consistency.
+_SOURCE_SUFFIXES = {".py",".js",".jsx",".ts",".tsx",".mjs",".cjs",".go",".rs",".java",".kt",".scala",".cs",".fs",".vb",".php",".rb",".ex",".exs"}
+
+
+def _unit_text(repo,unit): return scoped_text(repo,unit,suffixes=_SOURCE_SUFFIXES)
 
 def _health(repo,unit):
     t=_unit_text(repo,unit)
@@ -243,7 +272,9 @@ def analyze(repo,spec,result,target=None):
     elif not blockers and eco=="python":
         manifests,framework=_python(repo,selected); manifest=manifests[0] if manifests else None; language="Python"; spec.runtime={"name":"Python","version":"3.12"}; spec.build.update({"dependency_manifest":manifest,"project_dir":root})
         check("MANIFEST","Python dependency manifest","pass" if manifest else "blocker",manifests[:10])
-        port=_port(_unit_text(repo,selected),8000,readme["port"]); py=[f for f in files if f.endswith(".py")]; entry=None
+        unit_text=_unit_text(repo,selected); port=_port(unit_text,8000,readme["port"]); py=[f for f in files if f.endswith(".py")]; entry=None
+        system_packages=_system_packages(unit_text,PY_SUBPROCESS_BINARIES)
+        if system_packages: spec.build["system_packages"]=system_packages
         if framework=="Django":
             entry=next((f for f in py if Path(f).name=="wsgi.py"),None); start=f"gunicorn {_module(entry,root)}:application --bind 0.0.0.0:{port}" if entry else ""
             strategy="python-gunicorn"

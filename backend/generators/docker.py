@@ -69,7 +69,13 @@ def dockerfile(spec):
         # cross-directory references from the app (e.g. serving a sibling frontend/) keep working.
         project_dir = str(spec.build.get("project_dir") or "").strip("/")
         run_cmd = f"cd {project_dir} && {start}" if project_dir and project_dir != "." else start
-        return f'''FROM python:{py}-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/app\nWORKDIR /app\nCOPY . .\nRUN {install}\n{_user()}\nRUN chown 10001:10001 /app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(run_cmd)}\n'''
+        # A binary the app shells out to at runtime (e.g. `git clone`) is a real system
+        # dependency `pip install` never touches - the container boots fine and 500s the
+        # first time the app actually tries to use it. Install it before COPY so the layer
+        # caches independently of application code changes.
+        system_packages = spec.build.get("system_packages") or []
+        apt_install = f"RUN apt-get update && apt-get install -y --no-install-recommends {' '.join(system_packages)} && rm -rf /var/lib/apt/lists/*\n" if system_packages else ""
+        return f'''FROM python:{py}-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/app\nWORKDIR /app\n{apt_install}COPY . .\nRUN {install}\n{_user()}\nRUN chown 10001:10001 /app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(run_cmd)}\n'''
     if rt == "Go":
         command = spec.build.get("container_command") or 'CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app .'; lock = "COPY go.sum ./\n" if "go.sum" in files else ""
         return f'''FROM golang:{_tag(spec.runtime.get('version'), '1.24')}-bookworm AS build\nWORKDIR /src\nCOPY go.mod ./\n{lock}RUN go mod download\nCOPY . .\nRUN {command}\nFROM gcr.io/distroless/static-debian12:nonroot\nCOPY --from=build /out/app /app\nEXPOSE {port}\nENTRYPOINT ["/app"]\n'''
