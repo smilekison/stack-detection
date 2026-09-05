@@ -1,4 +1,4 @@
-from pathlib import Path
+import pytest
 
 import main
 
@@ -20,15 +20,15 @@ def test_analysis_phase_never_generates_artifacts(tmp_path, monkeypatch):
     assert result['generation'] == {'status': 'not_requested', 'requested_artifact': None}
 
 
-def test_structured_generation_errors_are_json_objects():
-    from fastapi import HTTPException
+def test_generation_gate_returns_structured_error():
+    with pytest.raises(main.HTTPException) as caught:
+        main._generation_gate(
+            {'deep_analysis': {'status': 'blocked', 'blockers': [{'title': 'No entrypoint'}]}},
+            type('Spec', (), {'migrations': {}})(),
+            'dockerfile',
+        )
 
-    error = main._generation_gate(
-        {'deep_analysis': {'status': 'blocked', 'blockers': [{'title': 'No entrypoint'}]}},
-        type('Spec', (), {'migrations': {}})(),
-        'dockerfile',
-    )
-
-    # _generation_gate raises before this line; the test exists to document that
-    # errors are intentionally structured and must be normalized by the UI.
-    assert error is None
+    assert isinstance(caught.value.detail, dict)
+    assert caught.value.detail['phase'] == 'analysis_gate'
+    assert caught.value.detail['requested_artifact'] == 'dockerfile'
+    assert caught.value.detail['deep_analysis']['status'] == 'blocked'
