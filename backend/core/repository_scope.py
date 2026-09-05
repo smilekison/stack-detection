@@ -1,61 +1,52 @@
 """Repository-level application boundaries and evidence scoping.
 
-The detector must reason about application units before framework/runtime detection. A unit is
-identified by its own manifest and directory; documentation, tests, detector source and other
-applications cannot become framework evidence merely because they contain matching words.
+This is the evidence firewall between repository inventory and deployment generation.
+A repository may be polyglot, a monorepo, or contain documentation/tests that mention
+other technologies. We normalize manifests by application root and keep unrelated units
+separate before any framework detector is allowed to run.
 """
 from pathlib import Path
+from .technology_catalog import MANIFEST_ECOSYSTEMS, ecosystem_for_manifest
 
-MANIFESTS = {
-    "package.json": "node", "pyproject.toml": "python", "requirements.txt": "python", "Pipfile": "python",
-    "go.mod": "go", "Cargo.toml": "rust", "pom.xml": "jvm", "build.gradle": "jvm", "build.gradle.kts": "jvm",
-    "composer.json": "php", "Gemfile": "ruby", "mix.exs": "elixir", "Package.swift": "swift", "pubspec.yaml": "dart",
-}
-MANIFEST_PRIORITY = {"pyproject.toml": 50, "Pipfile": 40, "requirements.txt": 30, "package.json": 50, "go.mod": 50, "Cargo.toml": 50, "pom.xml": 40, "build.gradle": 40, "build.gradle.kts": 40, "composer.json": 50, "Gemfile": 50, "mix.exs": 50, "Package.swift": 50, "pubspec.yaml": 50}
 CONTROL_DIRS = {"backend", "frontend", "server", "client", "api", "app", "web", "worker", "workers", "services", "apps", "packages", "src"}
-ENTRYPOINT_NAMES = {"main.py", "app.py", "server.py", "wsgi.py", "asgi.py", "main.go", "main.rs", "Program.cs", "index.php", "config.ru", "index.html"}
-NON_RUNTIME_DIRS = {"tests", "test", "__tests__", "docs", "doc", "examples", "example", "fixtures", "mocks", "mock", "benchmarks", "benchmark"}
+ENTRYPOINT_NAMES = {"main.py", "app.py", "server.py", "wsgi.py", "asgi.py", "main.go", "main.rs", "Program.cs", "index.php", "config.ru", "index.html", "Application.java", "Main.java"}
+NON_RUNTIME_DIRS = {"tests", "test", "__tests__", "docs", "doc", "examples", "example", "fixtures", "mocks", "mock", "benchmarks", "benchmark", "samples", "sample"}
 NON_RUNTIME_NAMES = {"readme.md", "readme.rst", "changelog.md", "license", "license.md"}
 
 
-def _depth(path):
-    return len(Path(path).parts)
-
+def _depth(path): return len(Path(path).parts)
 
 def _root_for(path):
     p = Path(path).parent
     return "" if str(p) == "." else p.as_posix()
 
-
-def _under(path, root):
-    return not root or path == root or path.startswith(root + "/")
+def _under(path, root): return not root or path == root or path.startswith(root + "/")
 
 
 def discover_units(repo):
-    """Discover one normalized application unit per directory/ecosystem."""
+    """Discover application units by directory, supporting polyglot applications."""
     grouped = {}
     for path in repo.files:
-        name = Path(path).name
-        ecosystem = MANIFESTS.get(name)
+        ecosystem = ecosystem_for_manifest(path)
         if not ecosystem:
             continue
         root = _root_for(path)
-        key = (root, ecosystem)
-        grouped.setdefault(key, []).append(path)
+        grouped.setdefault(root, []).append(path)
 
     units = []
-    for (root, ecosystem), manifests in grouped.items():
-        manifests = sorted(manifests, key=lambda p: (-MANIFEST_PRIORITY.get(Path(p).name, 0), _depth(p), p))
-        canonical = manifests[0]
+    for root, manifests in grouped.items():
+        manifests = sorted(manifests, key=lambda p: (Path(p).name not in {"package.json", "pyproject.toml", "go.mod", "Cargo.toml", "pom.xml", "composer.json", "Gemfile"}, _depth(p), p))
+        ecosystems = sorted({ecosystem_for_manifest(p) for p in manifests if ecosystem_for_manifest(p)})
         units.append({
-            "id": root or ".", "root": root, "manifest": canonical, "manifests": manifests,
-            "manifest_name": Path(canonical).name, "ecosystem": ecosystem,
+            "id": root or ".", "root": root, "manifest": manifests[0], "manifests": manifests,
+            "manifest_name": Path(manifests[0]).name, "ecosystem": ecosystems[0] if len(ecosystems) == 1 else "polyglot",
+            "ecosystems": ecosystems,
         })
 
     if not units:
         html = [f for f in repo.files if Path(f).name == "index.html" and not any(p.lower() in NON_RUNTIME_DIRS for p in Path(f).parts[:-1])]
         for root in sorted({_root_for(f) for f in html}, key=lambda x: (_depth(x), x)):
-            units.append({"id": root or ".", "root": root, "manifest": None, "manifests": [], "manifest_name": None, "ecosystem": "static"})
+            units.append({"id": root or ".", "root": root, "manifest": None, "manifests": [], "manifest_name": None, "ecosystem": "static", "ecosystems": ["static"]})
     return sorted(units, key=lambda u: (_depth(u["root"]), u["root"], u["manifest"] or ""))
 
 
@@ -65,25 +56,20 @@ def files_for_unit(repo, unit, include_nested_units=False, include_non_runtime=F
     nested_roots = {u["root"] for u in all_units if u["root"] and u["root"] != root and _under(u["root"], root)}
     out = []
     for f in repo.files:
-        if not _under(f, root):
-            continue
-        if not include_nested_units and any(_under(f, n) for n in nested_roots):
-            continue
+        if not _under(f, root): continue
+        if not include_nested_units and any(_under(f, n) for n in nested_roots): continue
         if not include_non_runtime:
             parts = Path(f).parts
-            if any(p.lower() in NON_RUNTIME_DIRS for p in parts[:-1]) or Path(f).name.lower() in NON_RUNTIME_NAMES:
-                continue
+            if any(p.lower() in NON_RUNTIME_DIRS for p in parts[:-1]) or Path(f).name.lower() in NON_RUNTIME_NAMES: continue
         out.append(f)
     for manifest in unit.get("manifests", []):
-        if manifest not in out:
-            out.append(manifest)
+        if manifest not in out: out.append(manifest)
     return sorted(set(out))
 
 
 def read_unit_json(repo, unit):
     manifest = unit.get("manifest")
-    if not manifest or not manifest.endswith(".json"):
-        return {}
+    if not manifest or not manifest.endswith(".json"): return {}
     return repo.json(manifest)
 
 
@@ -93,39 +79,31 @@ def text(repo, unit, suffixes=None, names=None, include_nested_units=False, incl
     return "\n".join(f"--- {f} ---\n{repo.read(f)}" for f in selected)
 
 
-def import_text(repo, unit, extensions):
-    return text(repo, unit, suffixes=extensions)
+def import_text(repo, unit, extensions): return text(repo, unit, suffixes=extensions)
 
 
 def _score(repo, unit):
-    files = set(files_for_unit(repo, unit)); s = 0
-    if unit.get("manifest"): s += 40
+    files = set(files_for_unit(repo, unit)); s = 40 if unit.get("manifest") else 0
     if any(Path(f).name in ENTRYPOINT_NAMES for f in files): s += 25
     if unit.get("root") == "": s += 8
     if Path(unit.get("root") or ".").name in CONTROL_DIRS: s += 8
-    if unit.get("manifest") and Path(unit["manifest"]).name == "package.json":
-        pkg = read_unit_json(repo, unit); scripts = pkg.get("scripts") or {}
-        if scripts.get("build"): s += 10
-        if scripts.get("start") or scripts.get("serve") or scripts.get("dev"): s += 10
-        if pkg.get("dependencies") or pkg.get("devDependencies"): s += 3
-    if len(unit.get("manifests", [])) > 1: s += 2
+    if len(unit.get("ecosystems", [])) == 1: s += 5
+    # Multiple manifests in the same directory are evidence of one polyglot unit,
+    # not multiple applications, so do not penalize them.
     return s
 
 
 def select_unit(repo, preferred_root=None):
-    """Select one deployment target only when repository evidence supports it."""
+    """Select one target only when repository evidence supports it; never guess between apps."""
     units = discover_units(repo)
-    if not units:
-        return None, units, "no_application_unit"
+    if not units: return None, units, "no_application_unit"
     if preferred_root is not None:
         exact = [u for u in units if u["root"] == preferred_root or u["id"] == preferred_root]
-        if len(exact) == 1:
-            return exact[0], units, None
+        if len(exact) == 1: return exact[0], units, None
     ranked = sorted(((_score(repo, u), u) for u in units), key=lambda x: (-x[0], _depth(x[1]["root"]), x[1]["root"]))
     if len(ranked) > 1:
         top_score, top = ranked[0]; second_score, second = ranked[1]
-        if top["root"] != second["root"] and second_score >= max(50, top_score - 8):
-            return None, units, "ambiguous_application_units"
+        if top["root"] != second["root"] and second_score >= max(50, top_score - 8): return None, units, "ambiguous_application_units"
     return ranked[0][1], units, None
 
 
