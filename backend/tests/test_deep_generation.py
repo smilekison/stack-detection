@@ -1,6 +1,5 @@
 from core.scanner import Repository
 from core.engine import Analyzer
-from core.deep_analysis import analyze as deep_analyze
 from generators.docker import dockerfile
 
 
@@ -20,7 +19,7 @@ def astro_fixture(tmp_path):
 def test_astro_deep_analysis_reconciles_vercel_adapter_and_runtime(tmp_path):
     repo = astro_fixture(tmp_path)
     spec, _, result = Analyzer(repo).analyze()
-    deep = deep_analyze(repo, spec, result)
+    deep = result['deep_analysis']
     assert deep['status'] == 'ready'
     assert spec.build['runtime_strategy'] == 'dev-server-fallback'
     assert spec.network['port'] == 4321
