@@ -27,11 +27,15 @@ def test_stack_detection_can_analyze_and_generate_for_its_own_layout(tmp_path):
     assert spec.build["dependency_manifest"] == "backend/requirements.txt"
     assert spec.build["entrypoint"] == "backend/main.py"
     assert spec.build["runtime_strategy"] == "python-uvicorn"
-    assert "uvicorn backend.main:app" in spec.processes[0]["start_command"]
+    # The module name is relative to the application root (backend/), not the repo root:
+    # `uvicorn backend.main:app` run from the repo root would crash on `main.py`'s own
+    # `from core.scanner import ...`-style imports, which are written relative to backend/
+    # itself (verified with a real Docker build+run - see PR history for the traceback).
+    assert "uvicorn main:app" in spec.processes[0]["start_command"]
 
     generated = dockerfile(spec)
     assert "COPY . ." in generated
     assert "pip install --no-cache-dir -r backend/requirements.txt" in generated
-    assert "uvicorn backend.main:app" in generated
+    assert "cd backend && uvicorn main:app" in generated
     assert "EXPOSE 8000" in generated
     assert "USER 10001" in generated

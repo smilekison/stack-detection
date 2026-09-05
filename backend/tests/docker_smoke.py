@@ -88,6 +88,40 @@ def main():
             "requirements.txt": "fastapi==0.116.1\nuvicorn==0.35.0\n",
             "main.py": "from fastapi import FastAPI\napp=FastAPI()\n",
         }), 8000),
+        # A nested application root (backend/) whose own entrypoint imports a sibling
+        # module (core.util) relative to THAT root, not the repo root - catches the
+        # module-path regression a flat-root fixture can never exercise: a naive
+        # `uvicorn backend.main:app` run from the repo root crashes on this import even
+        # though it looks like a perfectly plausible module reference.
+        "python-nested": (fixture("python-nested", {
+            "backend/requirements.txt": "fastapi==0.116.1\nuvicorn==0.35.0\n",
+            "backend/main.py": "from fastapi import FastAPI\nfrom core.util import ok\napp=FastAPI()\n@app.get('/')\ndef root(): return {'ok': ok()}\n",
+            "backend/core/util.py": "def ok(): return True\n",
+        }), 8000),
+        "nextjs": (fixture("nextjs", {
+            "package.json": json.dumps({"scripts": {"dev": "next dev", "build": "next build", "start": "next start"}, "dependencies": {"next": "14.2.5", "react": "18.3.1", "react-dom": "18.3.1"}}),
+            "pages/index.js": "export default function Home() { return 'ok'; }\n",
+        }), 3000),
+        "django": (fixture("django", {
+            "requirements.txt": "Django==5.0.7\ngunicorn==22.0.0\n",
+            "manage.py": "import os, sys\nif __name__=='__main__':\n    os.environ.setdefault('DJANGO_SETTINGS_MODULE','mysite.settings')\n    from django.core.management import execute_from_command_line\n    execute_from_command_line(sys.argv)\n",
+            "mysite/__init__.py": "",
+            "mysite/settings.py": "SECRET_KEY='fixture'\nDEBUG=False\nALLOWED_HOSTS=['*']\nROOT_URLCONF='mysite.urls'\nWSGI_APPLICATION='mysite.wsgi.application'\nINSTALLED_APPS=['django.contrib.contenttypes','django.contrib.auth']\nDATABASES={}\nUSE_TZ=True\n",
+            "mysite/urls.py": "from django.http import HttpResponse\nfrom django.urls import path\ndef index(request): return HttpResponse('ok')\nurlpatterns=[path('',index)]\n",
+            "mysite/wsgi.py": "import os\nfrom django.core.wsgi import get_wsgi_application\nos.environ.setdefault('DJANGO_SETTINGS_MODULE','mysite.settings')\napplication=get_wsgi_application()\n",
+        }), 8000),
+        # Nested Django, same shape as python-nested: proves the module-path fix
+        # generalizes to Django/gunicorn, not just FastAPI/uvicorn.
+        "django-nested": (fixture("django-nested", {
+            "backend/requirements.txt": "Django==5.0.7\ngunicorn==22.0.0\n",
+            "backend/manage.py": "import os, sys\nif __name__=='__main__':\n    os.environ.setdefault('DJANGO_SETTINGS_MODULE','mysite.settings')\n    from django.core.management import execute_from_command_line\n    execute_from_command_line(sys.argv)\n",
+            "backend/mysite/__init__.py": "",
+            "backend/mysite/settings.py": "SECRET_KEY='fixture'\nDEBUG=False\nALLOWED_HOSTS=['*']\nROOT_URLCONF='mysite.urls'\nWSGI_APPLICATION='mysite.wsgi.application'\nINSTALLED_APPS=['django.contrib.contenttypes','django.contrib.auth']\nDATABASES={}\nUSE_TZ=True\n",
+            "backend/mysite/urls.py": "from django.http import HttpResponse\nfrom django.urls import path\nfrom core.util import ok\ndef index(request): return HttpResponse('ok' if ok() else 'fail')\nurlpatterns=[path('',index)]\n",
+            "backend/mysite/wsgi.py": "import os\nfrom django.core.wsgi import get_wsgi_application\nos.environ.setdefault('DJANGO_SETTINGS_MODULE','mysite.settings')\napplication=get_wsgi_application()\n",
+            "backend/core/__init__.py": "",
+            "backend/core/util.py": "def ok(): return True\n",
+        }), 8000),
         "go": (fixture("go", {
             "go.mod": "module smoke\n\ngo 1.24\n",
             "main.go": 'package main\nimport ("fmt"; "net/http")\nfunc main(){http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){fmt.Fprint(w,"ok")}); http.ListenAndServe(":8080",nil)}\n',
