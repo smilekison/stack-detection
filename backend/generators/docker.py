@@ -93,6 +93,9 @@ def dockerfile(spec):
             install = "pip install --no-cache-dir pipenv && pipenv install --system --deploy"
         else:
             raise ValueError("No verified Python dependency manifest was resolved.")
+        strategy_server = "uvicorn" if spec.build.get("runtime_strategy") == "python-uvicorn" else ("gunicorn" if spec.build.get("runtime_strategy") == "python-gunicorn" else None)
+        if strategy_server:
+            install += f" && pip install --no-cache-dir {strategy_server}"
         if not start:
             raise ValueError("No verified Python runtime command was resolved.")
         return f"""FROM python:{py}-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\nWORKDIR /app\nCOPY . .\nRUN {install}\n{_copy_user_setup()}\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n"""
