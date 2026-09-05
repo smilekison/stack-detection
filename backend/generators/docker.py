@@ -10,7 +10,7 @@ def _node_install(spec):
         return pm, 'RUN corepack enable && corepack prepare yarn@stable --activate', 'COPY package.json yarn.lock ./', 'RUN yarn install --immutable'
     if pm == 'bun':
         return pm, 'RUN npm install -g bun', 'COPY package.json bun.lock ./', 'RUN bun install --frozen-lockfile'
-    if evidence == 'package-lock.json' or pm == 'npm':
+    if evidence == 'package-lock.json':
         return 'npm', '', 'COPY package.json package-lock.json ./', 'RUN npm ci'
     return 'npm', '', 'COPY package.json ./', 'RUN npm install'
 
