@@ -38,6 +38,15 @@ class AnalyzeRequest(BaseModel):
     target: str | None = None
     mode: str | None = None  # 'generate' | 'existing' - required when a Dockerfile already exists
 
+class MultiRepoInput(BaseModel):
+    repo_url: HttpUrl
+    role: str | None = None  # optional hint: "backend" - resolves ambiguity when more than
+                              # one submitted repo declares its own backing data service
+
+class MultiComposeRequest(BaseModel):
+    repos: list[MultiRepoInput] = Field(min_length=2, max_length=6)
+    providers: list[str] = Field(default_factory=lambda: ['aws', 'gcp', 'azure'])
+
 class ValidateRequest(AnalyzeRequest):
     run_validation: bool = True
 
@@ -282,6 +291,30 @@ def generate_compose(req: AnalyzeRequest):
         filename, content, d, generation = _generate_from_analysis(root, d, spec, 'docker-compose', req)
         return {'analysis_id': d['analysis_id'], 'summary': d['summary'], 'deep_analysis': d.get('deep_analysis', {}), 'stacks': {'languages': d['languages'], 'frameworks': d['frameworks'], 'services': d['summary']['services']}, 'compose': content, 'deployment_ir': d['deployment_ir'], 'generation': generation}
     finally: shutil.rmtree(tmp, ignore_errors=True)
+
+@app.post('/generate/multi/docker-compose')
+def generate_multi_compose(req: MultiComposeRequest):
+    from core.multi_compose import build as build_multi, slug as slug_for
+    tmps, analyzed = [], []
+    try:
+        for r in req.repos:
+            tmp, root = clone(r.repo_url); tmps.append(tmp)
+            result, repo, spec = analyze_root(root, req.providers, repo_url=r.repo_url)
+            deep = result.get('deep_analysis', {})
+            if deep.get('status') != 'ready':
+                raise HTTPException(status_code=422, detail={'message': f'{r.repo_url} did not reach a deterministic ready state on its own; multi-service generation requires every repo to analyze cleanly first, since cross-repo wiring is built on top of each repo\'s own resolved runtime/port/services.', 'repo_url': str(r.repo_url), 'deep_analysis': deep})
+            base = slug_for(r.repo_url); s = base; n = 2
+            while s in {a['slug'] for a in analyzed}: s = f'{base}-{n}'; n += 1
+            analyzed.append({'slug': s, 'spec': spec, 'result': result, 'repo': repo, 'role': r.role, 'repo_url': str(r.repo_url)})
+        dockerfiles, compose_content, notes = build_multi(analyzed)
+        return {
+            'services': {a['slug']: {'repo_url': a['repo_url'], 'summary': a['result']['summary'], 'deep_analysis': a['result'].get('deep_analysis', {})} for a in analyzed},
+            'dockerfiles': dockerfiles,
+            'compose': compose_content,
+            'notes': notes,
+        }
+    finally:
+        for t in tmps: shutil.rmtree(t, ignore_errors=True)
 
 @app.post('/generate/{artifact}')
 def generate_artifact(artifact: str, req: AnalyzeRequest):
