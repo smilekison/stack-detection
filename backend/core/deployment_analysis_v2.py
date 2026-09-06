@@ -187,7 +187,11 @@ def _services(repo,unit):
     # generic source-text scan matched this very module's own SERVICES rules table as
     # "evidence" that stack-detection itself uses all 14 listed services - the same
     # detector-source-becomes-its-own-evidence bug fixed twice already today, elsewhere.
-    t=_manifest_text(repo,unit).lower(); rules={"PostgreSQL":("postgresql","postgres","psycopg","asyncpg","pgx","prisma","typeorm"),"MySQL":("mysql","mysql2","pymysql"),"MariaDB":("mariadb",),"MongoDB":("mongodb","mongoose","motor"),"Redis":("redis","ioredis","redis-py"),"RabbitMQ":("rabbitmq","amqp","pika","aio-pika"),"Kafka":("kafka","kafkajs","confluent-kafka"),"Elasticsearch":("elasticsearch","opensearch"),"S3/Object Storage":("s3","aws-sdk","boto3","minio"),"Supabase":("supabase",),"Firebase":("firebase",),"Stripe":("stripe",),"DynamoDB":("dynamodb",),"SQLite":("sqlite","sqlite3")}
+    # `"pg"` (quotes included) rather than bare `pg`: node-postgres's real package name is
+    # exactly two letters, too short to substring-match safely against raw manifest text
+    # (would fire on "page", "staging", ...) - but the quoted-both-sides form only appears
+    # when "pg" is itself a JSON key or string value, i.e. the actual dependency declaration.
+    t=_manifest_text(repo,unit).lower(); rules={"PostgreSQL":("postgresql","postgres","psycopg","asyncpg","pgx","prisma","typeorm","\"pg\""),"MySQL":("mysql","mysql2","pymysql"),"MariaDB":("mariadb",),"MongoDB":("mongodb","mongoose","motor"),"Redis":("redis","ioredis","redis-py"),"RabbitMQ":("rabbitmq","amqp","pika","aio-pika"),"Kafka":("kafka","kafkajs","confluent-kafka"),"Elasticsearch":("elasticsearch","opensearch"),"S3/Object Storage":("s3","aws-sdk","boto3","minio"),"Supabase":("supabase",),"Firebase":("firebase",),"Stripe":("stripe",),"DynamoDB":("dynamodb",),"SQLite":("sqlite","sqlite3")}
     return [{"name":n,"signals":[x for x in needles if x in t][:5]} for n,needles in rules.items() if any(x in t for x in needles)]
 
 
