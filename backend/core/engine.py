@@ -67,11 +67,19 @@ class Analyzer:
    if m:return int(m.group(1))
   return 3000 if any(x in self.r.lower for x in ['next.js','vite','express']) and 'python' not in self.r.lower else 8000
  def envs(self):
-  names=set()
-  for t in self.r.text.values():
-   for m in re.finditer(r'\b[A-Z][A-Z0-9_]{2,}\b',t):
-    if m.group(0) not in {'HTTP','HTTPS','JSON','NODE_ENV','PATH','HOME','PORT','TRUE','FALSE','GET','POST','PUT','DELETE'}:names.add(m.group(0))
-  return {'names':sorted(names)[:500],'secret_files':[f for f in self.r.files if Path(f).name.startswith('.env') and Path(f).name not in {'.env.example','.env.sample','.env.template'}]}
+  # A committed .env.example/.env.sample/.env.template is the project's OWN declaration of
+  # what it needs to run (Tier 1 deployment evidence) - far more precise than scanning every
+  # source file for uppercase-looking identifiers, which also catches enum members, JSON
+  # keys and other names that were never environment variables at all. Prefer it when present.
+  example=next((f for f in self.r.files if Path(f).name in {'.env.example','.env.sample','.env.template'}),None)
+  if example:names=sorted(set(re.findall(r'(?m)^\s*([A-Z][A-Z0-9_]*)\s*=',self.r.read(example))))
+  else:
+   names=set()
+   for t in self.r.text.values():
+    for m in re.finditer(r'\b[A-Z][A-Z0-9_]{2,}\b',t):
+     if m.group(0) not in {'HTTP','HTTPS','JSON','NODE_ENV','PATH','HOME','PORT','TRUE','FALSE','GET','POST','PUT','DELETE'}:names.add(m.group(0))
+   names=sorted(names)[:500]
+  return {'names':names,'example_file':example,'secret_files':[f for f in self.r.files if Path(f).name.startswith('.env') and Path(f).name not in {'.env.example','.env.sample','.env.template'}]}
  def infrastructure(self):
   files=[f for f in self.r.files if Path(f).name.lower() in {'dockerfile','compose.yml','compose.yaml','docker-compose.yml','terraform.tf','main.tf','pulumi.yaml','serverless.yml','vercel.json','render.yaml','fly.toml'} or f.startswith(('terraform/','k8s/','kubernetes/','helm/','infra/','.github/workflows/'))]
   return {'files':files,'providers':sorted(set(x for x in ['AWS','GCP','Azure','Kubernetes'] if x.lower() in self.r.lower))}
