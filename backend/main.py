@@ -13,7 +13,7 @@ from core.deps import graph
 from core.migrations import analyze as migration_analyze
 from core.models import DeploymentSpec
 from core.validate import static_dockerfile
-from generators.docker import dockerfile, compose
+from generators.docker import dockerfile, compose, dockerignore
 from generators.cloud import terraform, kubernetes
 from security.audit import audit, sbom_plan, vulnerability_plan, policy as security_policy
 from pricing.engine import PricingEngine
@@ -143,12 +143,13 @@ def _requested_artifact(spec, artifact):
     artifact = artifact.lower().strip()
     if artifact in {'dockerfile', 'docker'}: return 'Dockerfile', dockerfile(spec), 'dockerfile'
     if artifact in {'compose', 'docker-compose', 'docker_compose', 'compose.yaml'}: return 'compose.yaml', compose(spec), 'docker-compose'
+    if artifact in {'dockerignore', '.dockerignore'}: return '.dockerignore', dockerignore(spec), 'dockerignore'
     if artifact in {'k8s', 'kubernetes', 'k8s.yaml'}: return 'k8s.yaml', kubernetes(spec), 'kubernetes'
     if artifact.startswith('terraform-'):
         provider = artifact.removeprefix('terraform-').removesuffix('.tf')
         if provider not in {'aws', 'gcp', 'azure'}: raise HTTPException(400, f'Unsupported Terraform provider: {provider}')
         return f'terraform-{provider}.tf', terraform(spec, provider), f'terraform-{provider}'
-    raise HTTPException(400, f'Unsupported artifact: {artifact}. Supported artifacts: dockerfile, docker-compose, k8s, terraform-aws, terraform-gcp, terraform-azure.')
+    raise HTTPException(400, f'Unsupported artifact: {artifact}. Supported artifacts: dockerfile, docker-compose, dockerignore, k8s, terraform-aws, terraform-gcp, terraform-azure.')
 
 def _generation_gate(result, spec, artifact):
     deep = result.get('deep_analysis', {})

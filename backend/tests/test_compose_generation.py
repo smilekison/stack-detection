@@ -28,7 +28,8 @@ def test_compose_wires_a_newly_covered_service_with_depends_on_and_credentials(t
     out = compose(spec)
     assert "mongodb:" in out and "image: mongo:7" in out
     assert "MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?required}" in out
-    assert "    depends_on:\n      - mongodb" in out
+    assert "    depends_on:\n      mongodb:\n        condition: service_healthy" in out
+    assert '"db.adminCommand(\'ping\')"' in out and "restart: unless-stopped" in out
 
 
 def test_compose_wires_env_file_from_a_declared_env_example(tmp_path):

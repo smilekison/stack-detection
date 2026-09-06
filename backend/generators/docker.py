@@ -55,33 +55,61 @@ def _cmd(command): return json.dumps(["sh", "-c", command])
 def _user(): return "RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin appuser"
 
 
+def _healthcheck(kind, port, path):
+    # Only emitted when a real health endpoint was found in the app's own source (Tier 3
+    # evidence, see deployment_analysis_v2._health()) - never a guessed path like "/health"
+    # that may not exist and would make the container report unhealthy forever. Uses each
+    # runtime's own interpreter to make the HTTP call instead of curl/wget, which aren't
+    # installed in these slim/bookworm-slim base images and would otherwise need an extra
+    # apt-get layer just for this.
+    if not path: return ""
+    if kind == "python": cmd = f"python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}{path}', timeout=3)\""
+    elif kind == "node": cmd = f"node -e \"require('http').get('http://127.0.0.1:{port}{path}',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""
+    else: return ""
+    return f"HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD {cmd}\n"
+
+
 def dockerfile(spec):
     rt = spec.runtime.get("name", "Unknown"); port = spec.network.get("port") or 8000; strategy = spec.build.get("runtime_strategy")
     start = spec.processes[0].get("start_command", "") if spec.processes else ""; files = set(spec.project.get("files", []))
     if rt == "Static Web": return 'FROM nginxinc/nginx-unprivileged:1.27-alpine\nCOPY --chown=nginx:nginx . /usr/share/nginx/html\nEXPOSE 8080\nCMD ["nginx", "-g", "daemon off;"]\n'
     if rt == "Node.js":
         node = _tag(spec.runtime.get("version"), "20"); pm, setup, manifest, install = _node_install(spec); build = spec.build.get("container_command") or f"{pm} run build"
+        nodehc = _healthcheck("node", port, spec.network.get("health_endpoint"))
         if strategy == "dev-server-fallback":
             runtime_cmd = start or f"{pm} run dev -- --host 0.0.0.0 --port {port}"
-            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nCOPY --from=build --chown=10001:10001 /app /app\nENV HOST=0.0.0.0 PORT={port} HOME=/app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(runtime_cmd)}\n'''
+            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nCOPY --from=build --chown=10001:10001 /app /app\nENV HOST=0.0.0.0 PORT={port} HOME=/app\nUSER 10001\nEXPOSE {port}\n{nodehc}CMD {_cmd(runtime_cmd)}\n'''
         if strategy == "node-standalone":
-            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nENV NODE_ENV=production HOST=0.0.0.0 PORT={port} HOME=/app\nCOPY --from=build --chown=10001:10001 /app/dist ./dist\nCOPY --from=build --chown=10001:10001 /app/node_modules ./node_modules\nUSER 10001\nEXPOSE {port}\nCMD ["node", "./dist/server/entry.mjs"]\n'''
+            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nENV NODE_ENV=production HOST=0.0.0.0 PORT={port} HOME=/app\nCOPY --from=build --chown=10001:10001 /app/dist ./dist\nCOPY --from=build --chown=10001:10001 /app/node_modules ./node_modules\nUSER 10001\nEXPOSE {port}\n{nodehc}CMD ["node", "./dist/server/entry.mjs"]\n'''
         if strategy == "static-preview":
-            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\nCOPY --from=build /app /app\nENV HOST=0.0.0.0 PORT={port}\nEXPOSE {port}\nCMD {_cmd(f'{pm} run preview -- --host 0.0.0.0 --port {port}')}\n'''
+            return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\nCOPY --from=build /app /app\nENV HOST=0.0.0.0 PORT={port}\nEXPOSE {port}\n{nodehc}CMD {_cmd(f'{pm} run preview -- --host 0.0.0.0 --port {port}')}\n'''
         if strategy == "static-node":
             output = str(spec.build.get("output") or "dist").strip("/")
             return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime\nCOPY --from=build --chown=nginx:nginx /app/{output}/ /usr/share/nginx/html/\nEXPOSE 8080\nCMD ["nginx", "-g", "daemon off;"]\n'''
         if not start: raise ValueError("No verified Node runtime command was resolved.")
-        return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nCOPY --from=build --chown=10001:10001 /app /app\nENV NODE_ENV=production HOST=0.0.0.0 PORT={port} HOME=/app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(start)}\n'''
+        return f'''FROM node:{node}-bookworm-slim AS build\nWORKDIR /app\n{setup}\n{manifest}\n{install}\nCOPY . .\nRUN {build}\nFROM node:{node}-bookworm-slim AS runtime\nWORKDIR /app\n{_user()}\nRUN chown 10001:10001 /app\nCOPY --from=build --chown=10001:10001 /app /app\nENV NODE_ENV=production HOST=0.0.0.0 PORT={port} HOME=/app\nUSER 10001\nEXPOSE {port}\n{nodehc}CMD {_cmd(start)}\n'''
     if rt == "Python":
         py = _tag(spec.runtime.get("version"), "3.12"); manifest = spec.build.get("dependency_manifest")
         if not manifest:
             manifest = next((f for f in files if Path(f).name in {"requirements.txt", "requirements-dev.txt", "pyproject.toml", "Pipfile"}), None)
         if not manifest: raise ValueError("No verified Python dependency manifest was resolved.")
-        manifest = str(manifest).replace("\\", "/")
-        if manifest.endswith(("requirements.txt", "requirements-dev.txt")): install = f"pip install --no-cache-dir -r {manifest}"
+        manifest = str(manifest).replace("\\", "/"); deps_first = ""
+        if manifest.endswith(("requirements.txt", "requirements-dev.txt")):
+            install = f"pip install --no-cache-dir -r {manifest}"
+            # requirements.txt is fully self-contained - copying just it (and installing from
+            # it) before the rest of the source tree means a source-only change doesn't bust
+            # the dependency-install layer, unlike copying everything up front.
+            deps_first = f"COPY {manifest} {manifest}\n"
         elif manifest.endswith("Pipfile"): install = f"pip install --no-cache-dir pipenv && pipenv install --system --deploy --chdir {Path(manifest).parent.as_posix() or '.'}"
-        else: install = f"pip install --no-cache-dir ./{manifest}"
+        else:
+            # `pip install ./pyproject.toml` is not valid pip syntax - pip rejects a bare
+            # .toml file with "Invalid requirement" (verified directly against real pip: it
+            # only accepts a package name, a requirement spec, a distribution archive, or a
+            # DIRECTORY containing pyproject.toml/setup.py). The parent directory is the
+            # actual project root pip needs. PEP 517 builds also commonly read the real
+            # package source during install, not just the manifest, so this stays copy-all-first
+            # rather than joining the requirements.txt fast path above.
+            install = f"pip install --no-cache-dir {Path(manifest).parent.as_posix() or '.'}"
         server = "uvicorn" if strategy == "python-uvicorn" else ("gunicorn" if strategy == "python-gunicorn" else None)
         if server and server not in install: install += f" && pip install --no-cache-dir {server}"
         if not start: raise ValueError("No verified Python runtime command was resolved.")
@@ -98,7 +126,9 @@ def dockerfile(spec):
         # caches independently of application code changes.
         system_packages = spec.build.get("system_packages") or []
         apt_install = f"RUN apt-get update && apt-get install -y --no-install-recommends {' '.join(system_packages)} && rm -rf /var/lib/apt/lists/*\n" if system_packages else ""
-        return f'''FROM python:{py}-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/app\nWORKDIR /app\n{apt_install}COPY . .\nRUN {install}\n{_user()}\nRUN chown 10001:10001 /app\nUSER 10001\nEXPOSE {port}\nCMD {_cmd(run_cmd)}\n'''
+        copy_install = f"{deps_first}RUN {install}\nCOPY . .\n" if deps_first else f"COPY . .\nRUN {install}\n"
+        healthcheck = _healthcheck("python", port, spec.network.get("health_endpoint"))
+        return f'''FROM python:{py}-slim AS runtime\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/app\nWORKDIR /app\n{apt_install}{copy_install}{_user()}\nRUN chown 10001:10001 /app\nUSER 10001\nEXPOSE {port}\n{healthcheck}CMD {_cmd(run_cmd)}\n'''
     if rt == "Go":
         command = spec.build.get("container_command") or 'CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app .'; lock = "COPY go.sum ./\n" if "go.sum" in files else ""
         return f'''FROM golang:{_tag(spec.runtime.get('version'), '1.24')}-bookworm AS build\nWORKDIR /src\nCOPY go.mod ./\n{lock}RUN go mod download\nCOPY . .\nRUN {command}\nFROM gcr.io/distroless/static-debian12:nonroot\nCOPY --from=build /out/app /app\nEXPOSE {port}\nENTRYPOINT ["/app"]\n'''
@@ -175,24 +205,62 @@ def dockerfile(spec):
 # catalog (S3, Supabase, Firebase, Stripe, DynamoDB) names managed third-party APIs with
 # no meaningful "run it in a container" story, so they're deliberately left out here
 # rather than faked into a container that wouldn't be the real thing anyway.
+# Each service's own image ships a real client binary for its own readiness probe (no extra
+# packages needed) - used both for the service's own HEALTHCHECK and so `app` can depend on
+# service_healthy instead of merely service_started (started only means "the process began
+# initializing", not "ready to accept connections" - Postgres/MySQL/Mongo all take a moment
+# after start before they'll actually accept a client).
 _COMPOSE_SERVICES = {
-    "PostgreSQL": ("postgres", "postgres:17", "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}", "/var/lib/postgresql/data"),
-    "MySQL": ("mysql", "mysql:9", "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?required}\n      MYSQL_DATABASE: ${MYSQL_DATABASE:-app}", "/var/lib/mysql"),
-    "MariaDB": ("mariadb", "mariadb:11", "      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?required}\n      MARIADB_DATABASE: ${MARIADB_DATABASE:-app}", "/var/lib/mysql"),
-    "MongoDB": ("mongodb", "mongo:7", "      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?required}\n      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?required}", "/data/db"),
-    "Redis": ("redis", "redis:7-alpine", None, "/data"),
+    "PostgreSQL": ("postgres", "postgres:17", "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}", "/var/lib/postgresql/data", ["CMD-SHELL", "pg_isready -U postgres"]),
+    "MySQL": ("mysql", "mysql:9", "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?required}\n      MYSQL_DATABASE: ${MYSQL_DATABASE:-app}", "/var/lib/mysql", ["CMD-SHELL", 'mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --silent']),
+    "MariaDB": ("mariadb", "mariadb:11", "      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?required}\n      MARIADB_DATABASE: ${MARIADB_DATABASE:-app}", "/var/lib/mysql", ["CMD-SHELL", 'mariadb-admin ping -h 127.0.0.1 -uroot -p"$$MARIADB_ROOT_PASSWORD" --silent']),
+    "MongoDB": ("mongodb", "mongo:7", "      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?required}\n      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?required}", "/data/db", ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]),
+    "Redis": ("redis", "redis:7-alpine", None, "/data", ["CMD", "redis-cli", "ping"]),
 }
+
+
+# Universal excludes: never bake VCS metadata, local secrets, or the generated artifacts
+# themselves into the image. The .env exclusion is the direct, general-purpose form of "never
+# copy secrets into the image" - a real .env (as opposed to a committed .env.example) is where
+# a developer's actual local credentials live.
+_DOCKERIGNORE_COMMON = [".git", ".gitignore", ".dockerignore", "Dockerfile", "docker-compose*.yml", "docker-compose*.yaml", "compose.yaml", ".env", ".env.*", "*.log", ".DS_Store", ".vscode", ".idea"]
+# Per-runtime directories that are either regenerated inside the build (so shipping the
+# host's own copy is pure waste) or - for PHP's vendor/ - actively dangerous to ship: it's
+# exactly the host vendor/ that clobbered the deps-stage's correctly `--no-dev` install
+# before (see docker.py's PHP branch). Excluding it here removes that failure mode at the
+# source instead of relying solely on the COPY-order workaround already in place.
+_DOCKERIGNORE_BY_RUNTIME = {
+    "Node.js": ["node_modules", "npm-debug.log*", ".next", "coverage"],
+    "Python": ["__pycache__", "*.pyc", ".venv", "venv", ".pytest_cache", ".mypy_cache"],
+    "PHP": ["vendor"],
+    "Ruby": ["vendor/bundle", ".bundle"],
+    "Rust": ["target"],
+    "JDK": ["target", "build", ".gradle"],
+    "JVM": ["target", "build", ".gradle"],
+    ".NET": ["bin", "obj"],
+}
+
+
+def dockerignore(spec):
+    rt = spec.runtime.get("name", "Unknown")
+    return "\n".join(_DOCKERIGNORE_COMMON + _DOCKERIGNORE_BY_RUNTIME.get(rt, [])) + "\n"
 
 
 def compose(spec):
     p = spec.network.get("port") or 8000; names = {x.get("name") for x in spec.services}; extra = []; vols = []; depends = []
-    for svc, (key, image, env, path) in _COMPOSE_SERVICES.items():
+    for svc, (key, image, env, path, hc) in _COMPOSE_SERVICES.items():
         if svc not in names: continue
         depends.append(key); vol = f"{key}-data"
         env_block = f"\n    environment:\n{env}" if env else ""
-        extra.append(f"  {key}:\n    image: {image}{env_block}\n    volumes:\n      - {vol}:{path}"); vols.append(f"  {vol}:")
+        healthcheck = f"\n    healthcheck:\n      test: {json.dumps(hc)}\n      interval: 10s\n      timeout: 5s\n      retries: 5"
+        extra.append(f"  {key}:\n    image: {image}{env_block}\n    volumes:\n      - {vol}:{path}{healthcheck}\n    restart: unless-stopped"); vols.append(f"  {vol}:")
     services = "\n".join(extra); volume_block = "\nvolumes:\n" + "\n".join(vols) if vols else ""
-    depends_block = "\n    depends_on:\n" + "\n".join(f"      - {d}" for d in depends) if depends else ""
+    # `condition: service_healthy`, not the short-form `depends_on` list, which only waits for
+    # the dependency's process to START (Docker's "service_started") - Postgres/MySQL/Mongo all
+    # take a moment after starting before they'll accept a real connection, and `app` racing
+    # ahead of that produces exactly the flaky "works on retry, fails on first boot" bug
+    # `depends_on` alone is known for.
+    depends_block = "\n    depends_on:\n" + "\n".join(f"      {d}:\n        condition: service_healthy" for d in depends) if depends else ""
     # A .env.example/.env.sample/.env.template in the repo (see engine.py's envs()) is the
     # project's own declaration of what it needs at runtime - wiring it in as `env_file`
     # here just means the same "cp .env.example .env" step every real-world compose-based
