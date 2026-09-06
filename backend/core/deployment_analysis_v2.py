@@ -48,7 +48,13 @@ def _port(content, default, readme_port=None):
     # (e.g. astro.config's explicit server.port) do not pass readme_port - that config stays
     # authoritative over README, same as it would over a generic source scan.
     if readme_port and 1 <= readme_port <= 65535: return readme_port
-    for pat in (r"(?i)--port(?:=|\s+)[\"']?(\d{2,5})", r"(?i)\bPORT\s*[:=]\s*[\"']?(\d{2,5})", r"(?i)localhost:(\d{2,5})", r"(?i)127\.0\.0\.1:(\d{2,5})"):
+    # `env.int('PORT', 1337)` (Strapi/Koa-style config reading with a fallback default) and
+    # `process.env.PORT || 3000` (the equally common plain-Express form) both put the actual
+    # default several tokens after the PORT reference, not directly after a `:`/`=` the way
+    # `PORT: 1337` or `PORT=1337` do - the generic pattern below never matched either shape,
+    # so a real config-declared default (Tier 1: the app's own server config, not a guess)
+    # silently lost to the generic 3000/8000 fallback instead.
+    for pat in (r"(?i)--port(?:=|\s+)[\"']?(\d{2,5})", r"(?i)env(?:\.int)?\(\s*[\"']PORT[\"']\s*,\s*(\d{2,5})", r"(?i)process\.env\.PORT\s*\|\|\s*[\"']?(\d{2,5})", r"(?i)\bPORT\s*[:=]\s*[\"']?(\d{2,5})", r"(?i)localhost:(\d{2,5})", r"(?i)127\.0\.0\.1:(\d{2,5})"):
         m = re.search(pat, content or "")
         if m and 1 <= int(m.group(1)) <= 65535: return int(m.group(1))
     return default
