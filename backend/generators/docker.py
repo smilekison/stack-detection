@@ -170,11 +170,33 @@ def dockerfile(spec):
     raise ValueError(f"No verified Docker generation strategy for runtime={rt}, strategy={strategy}")
 
 
+# Self-hostable data services with a well-known official image and standard credential
+# env vars - what compose() can wire up deterministically. The rest of _services()'s
+# catalog (S3, Supabase, Firebase, Stripe, DynamoDB) names managed third-party APIs with
+# no meaningful "run it in a container" story, so they're deliberately left out here
+# rather than faked into a container that wouldn't be the real thing anyway.
+_COMPOSE_SERVICES = {
+    "PostgreSQL": ("postgres", "postgres:17", "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}", "/var/lib/postgresql/data"),
+    "MySQL": ("mysql", "mysql:9", "      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?required}\n      MYSQL_DATABASE: ${MYSQL_DATABASE:-app}", "/var/lib/mysql"),
+    "MariaDB": ("mariadb", "mariadb:11", "      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?required}\n      MARIADB_DATABASE: ${MARIADB_DATABASE:-app}", "/var/lib/mysql"),
+    "MongoDB": ("mongodb", "mongo:7", "      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?required}\n      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?required}", "/data/db"),
+    "Redis": ("redis", "redis:7-alpine", None, "/data"),
+}
+
+
 def compose(spec):
-    p = spec.network.get("port") or 8000; names = {x.get("name") for x in spec.services}; extra = []; vols = []
-    if "PostgreSQL" in names:
-        extra.append('  postgres:\n    image: postgres:17\n    environment:\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}\n    volumes:\n      - postgres-data:/var/lib/postgresql/data'); vols.append("  postgres-data:")
-    if "Redis" in names:
-        extra.append('  redis:\n    image: redis:7-alpine\n    volumes:\n      - redis-data:/data'); vols.append("  redis-data:")
+    p = spec.network.get("port") or 8000; names = {x.get("name") for x in spec.services}; extra = []; vols = []; depends = []
+    for svc, (key, image, env, path) in _COMPOSE_SERVICES.items():
+        if svc not in names: continue
+        depends.append(key); vol = f"{key}-data"
+        env_block = f"\n    environment:\n{env}" if env else ""
+        extra.append(f"  {key}:\n    image: {image}{env_block}\n    volumes:\n      - {vol}:{path}"); vols.append(f"  {vol}:")
     services = "\n".join(extra); volume_block = "\nvolumes:\n" + "\n".join(vols) if vols else ""
-    return f'''services:\n  app:\n    build: .\n    ports:\n      - "{p}:{p}"\n    restart: unless-stopped\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    read_only: true\n    tmpfs:\n      - /tmp\n{services}{volume_block}\n'''
+    depends_block = "\n    depends_on:\n" + "\n".join(f"      - {d}" for d in depends) if depends else ""
+    # A .env.example/.env.sample/.env.template in the repo (see engine.py's envs()) is the
+    # project's own declaration of what it needs at runtime - wiring it in as `env_file`
+    # here just means the same "cp .env.example .env" step every real-world compose-based
+    # project already expects before its first run, not a new requirement this tool invents.
+    example = spec.environment.get("example_file") if isinstance(spec.environment, dict) else None
+    env_file_block = "\n    env_file:\n      - .env  # copy from " + example if example else ""
+    return f'''services:\n  app:\n    build: .\n    ports:\n      - "{p}:{p}"{env_file_block}{depends_block}\n    restart: unless-stopped\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    read_only: true\n    tmpfs:\n      - /tmp\n{services}{volume_block}\n'''
